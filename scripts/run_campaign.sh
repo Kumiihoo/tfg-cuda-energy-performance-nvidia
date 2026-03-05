@@ -16,8 +16,8 @@ Options:
   --skip-baseline         Skip baseline run (useful to resume power/plots/validation)
   --skip-build            Skip cmake configure/build step
   --install-python-deps   Run pip install -r requirements.txt before execution
-  --profile               Capture one Nsight Systems GEMM trace with timestamp
-  --profile-only          Capture only Nsight Systems trace and exit
+  --profile               Capture Nsight Systems BW/Compute/GEMM traces with timestamp
+  --profile-only          Capture only Nsight Systems BW/Compute/GEMM traces and exit
   --help                  Show this help
 
 Examples:
@@ -122,6 +122,41 @@ run_power_loop() {
   return 1
 }
 
+run_nsys_profile() {
+  local bench_bin="$1"
+  local gpu="$2"
+  local mode="$3"
+  local out_prefix="$4"
+  local tmp_nsys_dir="$5"
+  local out_root="$6"
+
+  mkdir -p "$(dirname "$out_prefix")" "$tmp_nsys_dir" "$out_root/tmp"
+
+  TMPDIR="$tmp_nsys_dir" CUDA_VISIBLE_DEVICES="$gpu" \
+    nsys profile --force-overwrite true --sample=none --cpuctxsw=none --trace=cuda,cublas \
+      -o "$out_prefix" \
+      "$bench_bin" --mode "$mode" --out-dir "$out_root/tmp"
+}
+
+run_nsys_profiles() {
+  local bench_bin="$1"
+  local gpu="$2"
+  local results_root="$3"
+  local tmp_nsys_dir="$4"
+  local ts="$5"
+  local step_label="$6"
+
+  local mode
+  for mode in bw compute gemm; do
+    local out_prefix="$results_root/profiling/${mode}_trace_${ts}"
+    echo "[$step_label] Capturing Nsight Systems ${mode} trace"
+    if ! run_nsys_profile "$bench_bin" "$gpu" "$mode" "$out_prefix" "$tmp_nsys_dir" "$results_root"; then
+      return 1
+    fi
+    echo "Done: profile trace at ${out_prefix}.nsys-rep"
+  done
+}
+
 ENV_NAME=""
 GPU="0"
 SAMPLE_MS="10"
@@ -219,6 +254,7 @@ BUILD_DIR="$BUILD_ROOT/$ENV_NAME"
 LEGACY_BUILD_DIR="$PROJECT_ROOT/build_$ENV_NAME"
 BENCH_BIN="$BUILD_DIR/bench"
 LOG_DIR="$RESULTS_ROOT/logs"
+NSYS_TMP_DIR="$RESULTS_ROOT/tmp/nsys_tmp"
 
 PYTHON_BIN="$(pick_python)"
 if [[ -z "$PYTHON_BIN" ]]; then
@@ -278,11 +314,14 @@ fi
 if [[ "$PROFILE_ONLY" == "1" ]]; then
   require_cmd nsys
   TS="$(date +%Y%m%d_%H%M%S)"
-  echo "[profile-only] Capturing Nsight Systems GEMM trace"
-  CUDA_VISIBLE_DEVICES="$GPU" nsys profile --force-overwrite true \
-    -o "$RESULTS_ROOT/profiling/gemm_trace_${TS}" \
-    "$BENCH_BIN" --mode gemm --out-dir "$RESULTS_ROOT/tmp"
-  echo "Done: profile trace at $RESULTS_ROOT/profiling/gemm_trace_${TS}.nsys-rep"
+  echo "[profile-only] Capturing Nsight Systems BW/Compute/GEMM traces"
+  echo "[profile-only] Using TMPDIR=$NSYS_TMP_DIR"
+  if ! run_nsys_profiles "$BENCH_BIN" "$GPU" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile-only"; then
+    echo "Error: Nsight Systems profiling failed in profile-only mode." >&2
+    echo "Hint: run 'nsys status --environment' and verify BENCH_BIN='$BENCH_BIN' is executable." >&2
+    exit 1
+  fi
+  echo "Done: profile traces at $RESULTS_ROOT/profiling/{bw,compute,gemm}_trace_${TS}.nsys-rep"
   exit 0
 fi
 
@@ -328,9 +367,12 @@ echo "[6/6] Validating outputs"
 if [[ "$DO_PROFILE" == "1" ]]; then
   require_cmd nsys
   TS="$(date +%Y%m%d_%H%M%S)"
-  CUDA_VISIBLE_DEVICES="$GPU" nsys profile --force-overwrite true \
-    -o "$RESULTS_ROOT/profiling/gemm_trace_${TS}" \
-    "$BENCH_BIN" --mode gemm --out-dir "$RESULTS_ROOT/tmp"
+  echo "[profile] Using TMPDIR=$NSYS_TMP_DIR"
+  if ! run_nsys_profiles "$BENCH_BIN" "$GPU" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile"; then
+    echo "Error: Nsight Systems profiling failed at end of campaign." >&2
+    echo "Hint: run 'nsys status --environment' and verify BENCH_BIN='$BENCH_BIN' is executable." >&2
+    exit 1
+  fi
 fi
 
 echo "Done: $ENV_NAME campaign completed."
@@ -338,6 +380,12 @@ echo "Results at: $RESULTS_ROOT"
 if [[ "$DO_PROFILE" != "1" ]]; then
   echo "Note: no Nsight trace generated. Re-run with --profile or --profile-only."
 fi
+
+
+
+
+
+
 
 
 

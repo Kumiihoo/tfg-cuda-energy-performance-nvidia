@@ -99,11 +99,13 @@ Useful flags:
 # Resume post-baseline stages only (power, summary, plots, validation)
 ./scripts/run_campaign.sh --env rtx5000 --skip-build --skip-baseline
 
-# Capture one Nsight Systems GEMM trace with timestamp at end of campaign
+# Capture Nsight Systems BW/Compute/GEMM traces with timestamp at end of campaign
 ./scripts/run_campaign.sh --env rtx5000 --profile
 
-# Capture only Nsight trace (no 1/6..6/6 pipeline)
+# Capture only Nsight BW/Compute/GEMM traces (no 1/6..6/6 pipeline)
 ./scripts/run_campaign.sh --env rtx5000 --profile-only --skip-build
+
+# Profiling uses TMPDIR automatically at results/<env>/tmp/nsys_tmp
 ```
 
 ## Validation and plotting (manual)
@@ -124,10 +126,19 @@ python scripts/validate_results.py --results-dir results/a100/baseline \
 
 ## Profiling
 
-Use Nsight Systems only for timeline evidence, not for final throughput tables:
+Use Nsight Systems only for timeline evidence, not for final throughput tables.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 nsys profile --force-overwrite true -o results/a100/profiling/gemm_trace_$(date +%Y%m%d_%H%M%S) ./build/a100/bench --mode gemm --out-dir results/a100/tmp
+# Automatic profiling (bw + compute + gemm) at end of campaign
+./scripts/run_campaign.sh --env a100 --gpu 0 --profile
+
+# Profiling only (bw + compute + gemm)
+./scripts/run_campaign.sh --env a100 --gpu 0 --profile-only --skip-build
+
+# Expected artifacts
+ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
+       results/a100/profiling/compute_trace_*.nsys-rep \
+       results/a100/profiling/gemm_trace_*.nsys-rep
 ```
 
 ## Methodology notes
@@ -137,6 +148,9 @@ CUDA_VISIBLE_DEVICES=0 nsys profile --force-overwrite true -o results/a100/profi
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - Active-power filtering uses an adaptive threshold based on observed SM clock.
+
+
+
 
 
 
