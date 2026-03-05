@@ -1,0 +1,3 @@
+Test,Performance,Avg Power,Efficiency,Pstate(mode),Avg SM clock
+GEMM TF32=0 (max),19190.24 GFLOP/s,38.87 W,493.7190 GFLOP/s/W, P0,367 MHz
+GEMM TF32=1 (max),139161.44 GFLOP/s,38.87 W,3580.2911 GFLOP/s/W, P0,367 MHz

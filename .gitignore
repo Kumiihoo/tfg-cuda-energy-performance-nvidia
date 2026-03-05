@@ -1,0 +1,64 @@
+# -----------------------------
+# Python / virtual environments
+# -----------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# -----------------------------
+# CMake / C++ / CUDA build outputs
+# -----------------------------
+/build/
+/build_*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/Makefile
+/install_manifest.txt
+/compile_commands.json
+
+# -----------------------------
+# IDE / OS files
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Logs and temporary artifacts
+# -----------------------------
+*.log
+results/*/tmp/*
+!results/*/tmp/.gitkeep
+results/*/logs/*
+!results/*/logs/.gitkeep
+
+# -----------------------------
+# Large or generated profiling artifacts
+# (keep summary CSV/PNG in repo, skip heavy traces)
+# -----------------------------
+results/*/profiling/*.nsys-rep
+results/*/profiling/*.qdstrm
+results/*/profiling/*.sqlite
+!results/*/profiling/.gitkeep
+
+# -----------------------------
+# Archives / backups
+# Ignore globally, but keep packaged experiment outputs under results/
+# -----------------------------
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+!results/**/*.tar
+!results/**/*.tar.gz
+!results/**/*.tgz
+!results/**/*.zip

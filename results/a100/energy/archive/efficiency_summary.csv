@@ -1,0 +1,6 @@
+Test,Performance,Avg Power,Efficiency,Avg GPU Util,Pstate (mode),Avg SM clock
+BW (plateau),1352.66 GB/s,34.32 W,39.4165 (GB/s)/W,4.8%, P0,287 MHz
+Compute FP32 (peak),17071.61 GFLOP/s,34.15 W,499.9697 GFLOP/s/W,4.3%, P0,301 MHz
+Compute FP64 (peak),9327.37 GFLOP/s,34.15 W,273.1671 GFLOP/s/W,4.3%, P0,301 MHz
+GEMM TF32=0 (max),19180.86 GFLOP/s,34.72 W,552.4888 GFLOP/s/W,4.8%, P0,299 MHz
+GEMM TF32=1 (max),139107.35 GFLOP/s,34.72 W,4006.8723 GFLOP/s/W,4.8%, P0,299 MHz

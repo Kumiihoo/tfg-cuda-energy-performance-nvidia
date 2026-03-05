@@ -1,0 +1,16 @@
+* text=auto
+
+# Linux executable scripts and source code must keep LF endings.
+*.sh text eol=lf
+*.py text eol=lf
+*.cu text eol=lf
+*.cuh text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.h text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+
+# Keep docs consistent too.
+*.md text eol=lf
