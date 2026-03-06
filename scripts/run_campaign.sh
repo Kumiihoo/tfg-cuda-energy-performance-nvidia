@@ -157,6 +157,56 @@ run_nsys_profiles() {
   done
 }
 
+write_run_config() {
+  local out_path="$1"
+  local git_commit="unknown"
+  local gpu_name=""
+  local driver_version=""
+  local cuda_driver_version=""
+  local cmd="./scripts/run_campaign.sh"
+
+  if command -v git >/dev/null 2>&1; then
+    git_commit="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n "$((GPU + 1))p" | xargs || true)"
+  driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
+  cuda_driver_version="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n1 | xargs || true)"
+
+  local arg
+  for arg in "${ORIGINAL_ARGS[@]}"; do
+    cmd+=" $(printf '%q' "$arg")"
+  done
+
+  cat > "$out_path" <<EOF
+run_timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+run_timestamp_local=$(date +%Y-%m-%dT%H:%M:%S%z)
+host=$(hostname)
+user=$(whoami)
+git_commit=$git_commit
+project_root=$PROJECT_ROOT
+environment=$ENV_NAME
+gpu_index=$GPU
+gpu_name=${gpu_name:-unknown}
+driver_version=${driver_version:-unknown}
+cuda_driver_version=${cuda_driver_version:-unknown}
+nvcc_bin=$NVCC_BIN
+python_bin=$PYTHON_BIN
+sample_ms=$SAMPLE_MS
+gemm_repeats=$GEMM_REPEATS
+compute_repeats=$COMPUTE_REPEATS
+bw_repeats=$BW_REPEATS
+skip_build=$SKIP_BUILD
+skip_baseline=$SKIP_BASELINE
+install_python_deps=$INSTALL_PY_DEPS
+profile=$DO_PROFILE
+profile_only=$PROFILE_ONLY
+build_dir=$BUILD_DIR
+results_root=$RESULTS_ROOT
+bench_bin=$BENCH_BIN
+command=$cmd
+EOF
+}
 ENV_NAME=""
 GPU="0"
 SAMPLE_MS="10"
@@ -168,6 +218,7 @@ SKIP_BUILD="0"
 INSTALL_PY_DEPS="0"
 DO_PROFILE="0"
 PROFILE_ONLY="0"
+ORIGINAL_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -311,6 +362,9 @@ if [[ ! -x "$BENCH_BIN" ]]; then
   exit 1
 fi
 
+write_run_config "$RESULTS_ROOT/env/run_config.txt"
+echo "Saved run config: $RESULTS_ROOT/env/run_config.txt"
+
 if [[ "$PROFILE_ONLY" == "1" ]]; then
   require_cmd nsys
   TS="$(date +%Y%m%d_%H%M%S)"
@@ -380,6 +434,11 @@ echo "Results at: $RESULTS_ROOT"
 if [[ "$DO_PROFILE" != "1" ]]; then
   echo "Note: no Nsight trace generated. Re-run with --profile or --profile-only."
 fi
+
+
+
+
+
 
 
 

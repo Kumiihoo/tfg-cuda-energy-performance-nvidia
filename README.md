@@ -9,9 +9,10 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `compute`: FP32/FP64 FMA throughput
   - `gemm`: cuBLAS SGEMM with TF32 on/off
 - Power telemetry via `nvidia-smi`
-- Plot generation scripts
+- Plot generation scripts (per-GPU and cross-GPU)
 - Active-power efficiency summary
-- CSV validator for reproducibility checks
+- CSV validators for reproducibility checks
+- End-to-end automation by environment
 
 ## Project layout
 
@@ -24,21 +25,26 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
 - `scripts/`
   - `power_logger.sh`: power logging helper
   - `energy_active_summary.py`: active-power efficiency summary
-  - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`: plot generators
-  - `validate_results.py`: CSV sanity validator
+  - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`: per-benchmark plot generators
+  - `plot_compare_envs.py`: A100 vs RTX5000 comparison CSV + plots
+  - `validate_results.py`: single-environment CSV sanity validator
+  - `validate_compare.py`: cross-environment artifact validator
   - `run_campaign.sh`: one-command end-to-end automation by environment
+  - `run_compare.sh`: one-command cross-environment comparison + validation
 - `results/`
   - `a100/`: A100 artifacts
   - `rtx5000/`: Quadro RTX 5000 artifacts
-
-Current repository data has been reorganized so existing baseline/energy/profiling artifacts are under `results/a100/...`.
+  - `compare/`: cross-environment comparison artifacts
 
 ## Requirements
 
 - Linux machine with NVIDIA GPU + driver
-- CUDA Toolkit (validated with CUDA 11.8 toolchain)
+- CUDA Toolkit (validated with CUDA 11.8+ toolchains)
 - CMake >= 3.18
-- C++ compiler
+- `make`
+- C++ compiler (`g++` or compatible)
+- `nvidia-smi` (driver CLI; required)
+- `nsys` (Nsight Systems CLI; required only when using `--profile` / `--profile-only`)
 - Python 3 with packages in `requirements.txt`
 
 Install Python deps:
@@ -59,32 +65,14 @@ cmake -S . -B build/rtx5000 -DCMAKE_CUDA_ARCHITECTURES=75
 cmake --build build/rtx5000 -j
 ```
 
-## Run benchmark suite manually
-
-If you do not pass `--out-dir`, benchmark output is auto-routed to:
-
-- `results/a100/baseline` on A100
-- `results/rtx5000/baseline` on RTX 5000
-- `results/other_gpu/baseline` otherwise
-
-Examples:
-
-```bash
-# Auto output routing by detected GPU
-CUDA_VISIBLE_DEVICES=0 ./build/a100/bench --mode all
-
-# Explicit path override
-CUDA_VISIBLE_DEVICES=0 ./build/rtx5000/bench --mode all --out-dir results/rtx5000/baseline
-```
-
-## One-command automation
+## One-command automation (per environment)
 
 Run full campaign for one environment (build, baseline, power logs, efficiency, plots, validation). Profiling is opt-in:
 
 ```bash
 chmod +x scripts/run_campaign.sh
-./scripts/run_campaign.sh --env a100 --gpu 0
-./scripts/run_campaign.sh --env rtx5000 --gpu 0
+./scripts/run_campaign.sh --env a100 --gpu 0 --profile
+./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile
 ```
 
 Useful flags:
@@ -104,29 +92,101 @@ Useful flags:
 
 # Capture only Nsight BW/Compute/GEMM traces (no 1/6..6/6 pipeline)
 ./scripts/run_campaign.sh --env rtx5000 --profile-only --skip-build
-
-# Profiling uses TMPDIR automatically at results/<env>/tmp/nsys_tmp
 ```
 
-## Validation and plotting (manual)
+Each campaign stores execution metadata in:
+
+```text
+results/<env>/env/run_config.txt
+```
+
+This file is part of the reproducibility artifacts (host, GPU, driver/CUDA versions, repeats, flags, command line, paths).
+
+## Cross-environment comparison (A100 vs RTX5000)
+
+After both environments have completed campaigns:
 
 ```bash
-python scripts/energy_active_summary.py \
-  --perf-dir results/a100/baseline \
-  --power-dir results/a100/energy \
-  --output results/a100/energy/efficiency_active_summary.csv
+chmod +x scripts/run_compare.sh
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
+```
 
-python scripts/plot_bw.py --input results/a100/baseline/bw.csv --output results/a100/baseline/bw.png
-python scripts/plot_compute.py --input results/a100/baseline/compute.csv --output results/a100/baseline/compute.png
-python scripts/plot_gemm.py --input results/a100/baseline/gemm.csv --output results/a100/baseline/gemm.png
+If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison, for example:
 
-python scripts/validate_results.py --results-dir results/a100/baseline \
+```bash
+scp -r <user_rtx>@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000
+```
+
+This generates:
+
+- `results/compare/summary_compare.csv`
+- `results/compare/perf_absolute_compare.png`
+- `results/compare/efficiency_compare.png`
+- `results/compare/speedup_a100_vs_rtx5000.png`
+
+## Preflight (environment checks only)
+
+Run this checklist on each server before final runs:
+
+```bash
+# 1) Enter project
+cd ~/tfg
+
+# 2) Activate virtual environment (venv or .venv)
+source venv/bin/activate 2>/dev/null || source .venv/bin/activate 2>/dev/null || true
+
+# 3) Install Python deps
+python -m pip install -r requirements.txt
+
+# 4) Normalize line endings and script permissions
+sed -i 's/\r$//' scripts/*.sh
+chmod +x scripts/run_campaign.sh scripts/run_compare.sh scripts/power_logger.sh
+
+# 5) Check CUDA compiler path
+which nvcc
+
+# 6) Check Nsight Systems path (needed for profiling)
+which nsys
+
+# 7) Check driver/GPU visibility
+nvidia-smi | head -n 5
+```
+
+## Two-server execution (A100 + RTX5000)
+
+Typical sequence:
+
+```bash
+# On A100 server
+./scripts/run_campaign.sh --env a100 --gpu 0 --profile
+
+# On RTX5000 server
+./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile
+
+# Back on A100 server: copy RTX5000 results and compare
+scp -r <user_rtx>@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
+```
+
+## Validation commands (manual)
+
+Single environment:
+
+```bash
+python scripts/validate_results.py \
+  --results-dir results/a100/baseline \
   --energy-summary results/a100/energy/efficiency_active_summary.csv
+```
+
+Cross environment:
+
+```bash
+python scripts/validate_compare.py --compare-dir results/compare
 ```
 
 ## Profiling
 
-Use Nsight Systems only for timeline evidence, not for final throughput tables.
+Use Nsight Systems for timeline evidence, not for final throughput tables.
 
 ```bash
 # Automatic profiling (bw + compute + gemm) at end of campaign
@@ -141,6 +201,14 @@ ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
        results/a100/profiling/gemm_trace_*.nsys-rep
 ```
 
+## Final packaging (archive all artifacts)
+
+Create a timestamped archive including both environments and comparison outputs:
+
+```bash
+tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/rtx5000 results/compare
+```
+
 ## Methodology notes
 
 - Final performance values must come from non-profiled runs.
@@ -148,9 +216,3 @@ ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - Active-power filtering uses an adaptive threshold based on observed SM clock.
-
-
-
-
-
-
