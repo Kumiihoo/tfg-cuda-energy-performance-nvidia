@@ -34,6 +34,42 @@ require_cmd() {
   fi
 }
 
+CURRENT_LOGGER_PID=""
+
+cleanup_current_logger() {
+  local logger_pid="${CURRENT_LOGGER_PID:-}"
+
+  if [[ -z "$logger_pid" ]]; then
+    return 0
+  fi
+
+  if kill -0 "$logger_pid" >/dev/null 2>&1; then
+    kill "$logger_pid" >/dev/null 2>&1 || true
+  fi
+
+  wait "$logger_pid" 2>/dev/null || true
+  CURRENT_LOGGER_PID=""
+}
+
+handle_exit_signal() {
+  local signal="$1"
+
+  trap - EXIT INT TERM HUP
+  cleanup_current_logger
+
+  case "$signal" in
+    INT)
+      exit 130
+      ;;
+    TERM)
+      exit 143
+      ;;
+    HUP)
+      exit 129
+      ;;
+  esac
+}
+
 pick_python() {
   if [[ -n "${PYTHON_BIN:-}" ]]; then
     echo "$PYTHON_BIN"
@@ -86,8 +122,10 @@ run_power_loop() {
   local attempt
   local local_repeats="$repeats"
   for attempt in 1 2; do
+    cleanup_current_logger
     sed 's/\r$//' "${PROJECT_ROOT}/scripts/power_logger.sh" | bash -s -- "$gpu" "$out_csv" "$sample_ms" &
-    local lp=$!
+    CURRENT_LOGGER_PID=$!
+    local lp="$CURRENT_LOGGER_PID"
 
     # Let the logger initialize so very short runs do not race startup.
     sleep 1.0
@@ -107,8 +145,7 @@ run_power_loop() {
       echo "Warning: power logger exited early for mode '$mode' (attempt ${attempt})" >&2
     fi
 
-    kill "$lp" >/dev/null 2>&1 || true
-    wait "$lp" 2>/dev/null || true
+    cleanup_current_logger
 
     if [[ -s "$out_csv" ]]; then
       return 0
@@ -219,6 +256,11 @@ INSTALL_PY_DEPS="0"
 DO_PROFILE="0"
 PROFILE_ONLY="0"
 ORIGINAL_ARGS=("$@")
+
+trap cleanup_current_logger EXIT
+trap 'handle_exit_signal INT' INT
+trap 'handle_exit_signal TERM' TERM
+trap 'handle_exit_signal HUP' HUP
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -434,7 +476,6 @@ echo "Results at: $RESULTS_ROOT"
 if [[ "$DO_PROFILE" != "1" ]]; then
   echo "Note: no Nsight trace generated. Re-run with --profile or --profile-only."
 fi
-
 
 
 
