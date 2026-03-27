@@ -10,10 +10,9 @@ Options:
   --env NAME              Environment name: a100 or rtx5000 (required)
   --gpu ID                CUDA visible GPU index (default: 0)
   --sample-ms N           Power sampling period in ms (default: 10)
-  --gemm-repeats N        GEMM repetitions for power run (default: 30)
-  --compute-repeats N     Compute repetitions for power run (default: 50)
-  --bw-repeats N          BW repetitions for power run (default: 10)
-  --skip-baseline         Skip baseline run (useful to resume power/plots/validation)
+  --energy-duration-ms N  Target in-process duration for each energy case in ms (default: 2000)
+  --stable-window-trim X  Fraction trimmed from start/end of run window (default: 0.15)
+  --skip-baseline         Skip baseline run (useful to resume energy/plots/validation)
   --skip-build            Skip cmake configure/build step
   --install-python-deps   Run pip install -r requirements.txt before execution
   --profile               Capture Nsight Systems BW/Compute/GEMM traces with timestamp
@@ -22,7 +21,7 @@ Options:
 
 Examples:
   ./scripts/run_campaign.sh --env a100
-  ./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile
+  ./scripts/run_campaign.sh --env rtx5000 --gpu 0 --energy-duration-ms 3000
   ./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile-only --skip-build
 EOF
 }
@@ -107,68 +106,72 @@ find_nvcc() {
   echo ""
 }
 
-run_power_loop() {
-  local label="$1"
-  local repeats="$2"
-  local out_csv="$3"
-  local bench_bin="$4"
-  local out_root="$5"
-  local gpu="$6"
-  local sample_ms="$7"
-  shift 7
-  local bench_args=("$@")
-
-  mkdir -p "$(dirname "$out_csv")"
-  : > "$out_csv"
-
-  local attempt
-  local local_repeats="$repeats"
-  for attempt in 1 2; do
-    cleanup_current_logger
-    sed 's/\r$//' "${PROJECT_ROOT}/scripts/power_logger.sh" | bash -s -- "$gpu" "$out_csv" "$sample_ms" &
-    CURRENT_LOGGER_PID=$!
-    local lp="$CURRENT_LOGGER_PID"
-
-    # Let the logger initialize so very short runs do not race startup.
-    sleep 1.0
-
-    for ((i = 1; i <= local_repeats; i++)); do
-      CUDA_VISIBLE_DEVICES="$gpu" "$bench_bin" "${bench_args[@]}" --out-dir "$out_root/tmp" >/dev/null
-    done
-
-    # Give logger a short grace period to flush first samples.
-    local waited=0
-    while [[ ! -s "$out_csv" && $waited -lt 30 ]]; do
-      sleep 0.1
-      waited=$((waited + 1))
-    done
-
-    if ! kill -0 "$lp" >/dev/null 2>&1; then
-      echo "Warning: power logger exited early for case '$label' (attempt ${attempt})" >&2
-    fi
-
-    cleanup_current_logger
-
-    if [[ -s "$out_csv" ]]; then
-      return 0
-    fi
-
-    echo "Warning: empty power log for case '$label' (attempt ${attempt}); retrying with more repeats..." >&2
-    local_repeats=$((local_repeats * 2))
-  done
-
-  echo "Error: failed to capture power log for case '$label' at $out_csv" >&2
-  return 1
-}
-
-load_case_args() {
+load_case_field() {
   local perf_dir="$1"
   local case_key="$2"
+  local field="$3"
 
   "$PYTHON_BIN" "$PROJECT_ROOT/scripts/perf_targets.py" \
     --perf-dir "$perf_dir" \
     --case "$case_key" \
-    --field args
+    --field "$field"
+}
+
+run_energy_case() {
+  local label="$1"
+  local case_key="$2"
+  local bench_bin="$3"
+  local out_root="$4"
+  local gpu="$5"
+  local sample_ms="$6"
+  local energy_duration_ms="$7"
+  local perf_dir="$8"
+
+  local out_csv
+  out_csv="$RESULTS_ROOT/energy/$(load_case_field "$perf_dir" "$case_key" power-log)"
+  local out_meta
+  out_meta="$RESULTS_ROOT/energy/$(load_case_field "$perf_dir" "$case_key" meta-log)"
+  local -a bench_args
+  read -r -a bench_args <<< "$(load_case_field "$perf_dir" "$case_key" args)"
+
+  mkdir -p "$(dirname "$out_csv")" "$(dirname "$out_meta")"
+  : > "$out_csv"
+
+  cleanup_current_logger
+  sed 's/\r$//' "${PROJECT_ROOT}/scripts/power_logger.sh" | bash -s -- "$gpu" "$out_csv" "$sample_ms" &
+  CURRENT_LOGGER_PID=$!
+  local logger_pid="$CURRENT_LOGGER_PID"
+
+  # Short preroll so nvidia-smi is already sampling when the benchmark starts.
+  sleep 1.0
+
+  if ! CUDA_VISIBLE_DEVICES="$gpu" "$bench_bin" \
+    "${bench_args[@]}" \
+    --energy-duration-ms "$energy_duration_ms" \
+    --energy-meta-out "$out_meta" \
+    --out-dir "$out_root/tmp" >/dev/null; then
+    cleanup_current_logger
+    echo "Error: long-run energy benchmark failed for case '$label'" >&2
+    return 1
+  fi
+
+  # Short postroll so the logger can flush the last sample after the benchmark exits.
+  sleep 0.5
+
+  if ! kill -0 "$logger_pid" >/dev/null 2>&1; then
+    echo "Warning: power logger exited early for case '$label'" >&2
+  fi
+
+  cleanup_current_logger
+
+  if [[ ! -s "$out_csv" ]]; then
+    echo "Error: empty power log for case '$label' at $out_csv" >&2
+    return 1
+  fi
+  if [[ ! -s "$out_meta" ]]; then
+    echo "Error: missing energy metadata for case '$label' at $out_meta" >&2
+    return 1
+  fi
 }
 
 run_nsys_profile() {
@@ -248,12 +251,12 @@ nvcc_bin=$NVCC_BIN
 python_bin=$PYTHON_BIN
 python_version=${python_version:-unknown}
 sample_ms=$SAMPLE_MS
-gemm_repeats=$GEMM_REPEATS
-compute_repeats=$COMPUTE_REPEATS
-bw_repeats=$BW_REPEATS
+energy_duration_ms=$ENERGY_DURATION_MS
+stable_window_trim=$STABLE_WINDOW_TRIM
 power_telemetry_source=nvidia-smi
 power_scope=gpu_board
 node_power_not_measured=1
+activity_definition=benchmark_stable_window
 skip_build=$SKIP_BUILD
 skip_baseline=$SKIP_BASELINE
 install_python_deps=$INSTALL_PY_DEPS
@@ -265,12 +268,12 @@ bench_bin=$BENCH_BIN
 command=$cmd
 EOF
 }
+
 ENV_NAME=""
 GPU="0"
 SAMPLE_MS="10"
-GEMM_REPEATS="30"
-COMPUTE_REPEATS="50"
-BW_REPEATS="10"
+ENERGY_DURATION_MS="2000"
+STABLE_WINDOW_TRIM="0.15"
 SKIP_BASELINE="0"
 SKIP_BUILD="0"
 INSTALL_PY_DEPS="0"
@@ -297,16 +300,12 @@ while [[ $# -gt 0 ]]; do
       SAMPLE_MS="${2:-}"
       shift 2
       ;;
-    --gemm-repeats)
-      GEMM_REPEATS="${2:-}"
+    --energy-duration-ms)
+      ENERGY_DURATION_MS="${2:-}"
       shift 2
       ;;
-    --compute-repeats)
-      COMPUTE_REPEATS="${2:-}"
-      shift 2
-      ;;
-    --bw-repeats)
-      BW_REPEATS="${2:-}"
+    --stable-window-trim)
+      STABLE_WINDOW_TRIM="${2:-}"
       shift 2
       ;;
     --skip-baseline)
@@ -450,35 +449,25 @@ else
   echo "[1/6] Skipping baseline benchmarks (--skip-baseline)"
 fi
 
-read -r -a BW_PEAK_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" bw_peak)"
-read -r -a BW_SUSTAINED_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" bw_sustained)"
-read -r -a COMPUTE_FP32_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" compute_fp32_peak)"
-read -r -a COMPUTE_FP64_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" compute_fp64_peak)"
-read -r -a GEMM_TF32_0_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" gemm_tf32_0_max)"
-read -r -a GEMM_TF32_1_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" gemm_tf32_1_max)"
+PERF_DIR="$RESULTS_ROOT/baseline"
 
 echo "[2/6] Logging bandwidth power cases"
-run_power_loop "BW peak" "$BW_REPEATS" "$RESULTS_ROOT/energy/power_bw_peak_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${BW_PEAK_ARGS[@]}"
-run_power_loop "BW sustained" "$BW_REPEATS" "$RESULTS_ROOT/energy/power_bw_sustained_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${BW_SUSTAINED_ARGS[@]}"
+run_energy_case "BW peak" "bw_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "BW sustained" "bw_sustained" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[3/6] Logging compute power cases"
-run_power_loop "Compute FP32 peak" "$COMPUTE_REPEATS" "$RESULTS_ROOT/energy/power_compute_fp32_peak_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${COMPUTE_FP32_ARGS[@]}"
-run_power_loop "Compute FP64 peak" "$COMPUTE_REPEATS" "$RESULTS_ROOT/energy/power_compute_fp64_peak_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${COMPUTE_FP64_ARGS[@]}"
+run_energy_case "Compute FP32 peak" "compute_fp32_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "Compute FP64 peak" "compute_fp64_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[4/6] Logging GEMM power cases"
-run_power_loop "GEMM TF32=0 max" "$GEMM_REPEATS" "$RESULTS_ROOT/energy/power_gemm_tf32_0_max_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${GEMM_TF32_0_ARGS[@]}"
-run_power_loop "GEMM TF32=1 max" "$GEMM_REPEATS" "$RESULTS_ROOT/energy/power_gemm_tf32_1_max_long.csv" \
-  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${GEMM_TF32_1_ARGS[@]}"
+run_energy_case "GEMM TF32=0 max" "gemm_tf32_0_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "GEMM TF32=1 max" "gemm_tf32_1_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[5/6] Computing efficiency + plots"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/energy_active_summary.py" \
   --perf-dir "$RESULTS_ROOT/baseline" \
   --power-dir "$RESULTS_ROOT/energy" \
+  --stable-window-trim "$STABLE_WINDOW_TRIM" \
   --output "$RESULTS_ROOT/energy/efficiency_active_summary.csv"
 
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/plot_bw.py" \
@@ -514,17 +503,3 @@ echo "Results at: $RESULTS_ROOT"
 if [[ "$DO_PROFILE" != "1" ]]; then
   echo "Note: no Nsight trace generated. Re-run with --profile or --profile-only."
 fi
-
-
-
-
-
-
-
-
-
-
-
-
-
-

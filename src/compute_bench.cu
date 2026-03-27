@@ -1,3 +1,5 @@
+#include "bench_api.h"
+
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -25,8 +27,8 @@ __global__ void fma_fp32(float* out, int iters) {
 
 #pragma unroll 4
     for (int i = 0; i < iters; ++i) {
-        x = fmaf(a, x, c);  // 2 FLOPs (mul+add)
-        x = fmaf(b, x, c);  // +2 FLOPs
+        x = fmaf(a, x, c);
+        x = fmaf(b, x, c);
     }
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,77 +50,140 @@ __global__ void fma_fp64(double* out, int iters) {
     if (tid == 0) out[0] = x;
 }
 
-// Returns average seconds per launch.
-template <typename LaunchFn>
-static double time_kernel(LaunchFn launch, int warmup, int reps) {
-    cudaEvent_t start, stop;
-    check(cudaEventCreate(&start), "event create start");
-    check(cudaEventCreate(&stop), "event create stop");
+class ComputeCaseRunner {
+public:
+    ComputeCaseRunner(const char* dtype, int block, int grid, int iters)
+        : block_(block), grid_(grid), iters_(iters) {
+        fp64_ = std::strcmp(dtype, "fp64") == 0;
+        if (!fp64_ && std::strcmp(dtype, "fp32") != 0) {
+            std::fprintf(stderr, "Unsupported compute dtype '%s'\n", dtype);
+            std::exit(1);
+        }
 
-    for (int i = 0; i < warmup; i++) launch();
-    check(cudaGetLastError(), "warmup launch");
-    check(cudaDeviceSynchronize(), "warmup sync");
+        if (fp64_) {
+            check(cudaMalloc((void**)&d_out_fp64_, sizeof(double)), "malloc fp64 out");
+            check(cudaMemset(d_out_fp64_, 0, sizeof(double)), "memset fp64 out");
+        } else {
+            check(cudaMalloc((void**)&d_out_fp32_, sizeof(float)), "malloc fp32 out");
+            check(cudaMemset(d_out_fp32_, 0, sizeof(float)), "memset fp32 out");
+        }
 
-    check(cudaEventRecord(start), "record start");
-    for (int i = 0; i < reps; i++) launch();
-    check(cudaGetLastError(), "timed launch");
-    check(cudaEventRecord(stop), "record stop");
-    check(cudaEventSynchronize(stop), "sync stop");
+        check(cudaEventCreate(&start_), "event create start");
+        check(cudaEventCreate(&stop_), "event create stop");
 
-    float ms = 0.0f;
-    check(cudaEventElapsedTime(&ms, start, stop), "elapsed");
+        warmup();
+    }
 
-    check(cudaEventDestroy(start), "destroy start");
-    check(cudaEventDestroy(stop), "destroy stop");
+    ~ComputeCaseRunner() {
+        if (start_) cudaEventDestroy(start_);
+        if (stop_) cudaEventDestroy(stop_);
+        if (d_out_fp32_) cudaFree(d_out_fp32_);
+        if (d_out_fp64_) cudaFree(d_out_fp64_);
+    }
 
-    return (ms / 1000.0) / (double)reps;
+    double measure_case_gflops() {
+        return flops_to_gflops(case_flops(), run_case_repeats_ms(1));
+    }
+
+    EnergyRunResult run_for_energy(double target_duration_ms) {
+        const double estimate_ms = std::max(estimate_case_ms(), 0.001);
+        long long case_repeats = std::max<long long>(
+            1, static_cast<long long>(std::ceil((target_duration_ms / estimate_ms) * 1.10)));
+
+        double measured_ms = run_case_repeats_ms(case_repeats);
+        while (measured_ms + 1e-6 < target_duration_ms) {
+            const double batch_ms = std::max(measured_ms / static_cast<double>(case_repeats), 0.001);
+            const long long extra_repeats = std::max<long long>(
+                1, static_cast<long long>(std::ceil(((target_duration_ms - measured_ms) / batch_ms) * 1.10)));
+            measured_ms += run_case_repeats_ms(extra_repeats);
+            case_repeats += extra_repeats;
+        }
+
+        return EnergyRunResult{
+            flops_to_gflops(case_flops() * static_cast<double>(case_repeats), measured_ms),
+            measured_ms,
+            case_repeats,
+        };
+    }
+
+private:
+    static constexpr int kWarmupLaunches = 5;
+    static constexpr int kCaseKernelLaunches = 50;
+
+    void warmup() {
+        for (int i = 0; i < kWarmupLaunches; ++i) {
+            launch_kernel_once();
+        }
+        check(cudaGetLastError(), "warmup launch");
+        check(cudaDeviceSynchronize(), "warmup sync");
+    }
+
+    void launch_kernel_once() {
+        if (fp64_) {
+            fma_fp64<<<grid_, block_>>>(d_out_fp64_, iters_);
+        } else {
+            fma_fp32<<<grid_, block_>>>(d_out_fp32_, iters_);
+        }
+    }
+
+    void launch_case_once() {
+        for (int i = 0; i < kCaseKernelLaunches; ++i) {
+            launch_kernel_once();
+        }
+    }
+
+    double estimate_case_ms() {
+        return run_case_repeats_ms(1);
+    }
+
+    double run_case_repeats_ms(long long case_repeats) {
+        check(cudaEventRecord(start_), "record start");
+        for (long long repeat = 0; repeat < case_repeats; ++repeat) {
+            launch_case_once();
+        }
+        check(cudaGetLastError(), "timed launch");
+        check(cudaEventRecord(stop_), "record stop");
+        check(cudaEventSynchronize(stop_), "sync stop");
+
+        float ms = 0.0f;
+        check(cudaEventElapsedTime(&ms, start_, stop_), "elapsed");
+        return static_cast<double>(ms);
+    }
+
+    double case_flops() const {
+        const double threads = static_cast<double>(grid_) * static_cast<double>(block_);
+        const double flops_per_kernel = threads * static_cast<double>(iters_) * 4.0;
+        return flops_per_kernel * static_cast<double>(kCaseKernelLaunches);
+    }
+
+    static double flops_to_gflops(double total_flops, double ms) {
+        const double seconds = ms / 1000.0;
+        if (seconds <= 0.0) return -1.0;
+        return (total_flops / seconds) / 1e9;
+    }
+
+    int block_ = 0;
+    int grid_ = 0;
+    int iters_ = 0;
+    bool fp64_ = false;
+    float* d_out_fp32_ = nullptr;
+    double* d_out_fp64_ = nullptr;
+    cudaEvent_t start_ = nullptr;
+    cudaEvent_t stop_ = nullptr;
+};
+
+double run_compute_case_gflops(const char* dtype, int block, int grid, int iters) {
+    ComputeCaseRunner runner(dtype, block, grid, iters);
+    return runner.measure_case_gflops();
 }
 
-static double run_fp32_gflops(int grid, int block, int iters) {
-    float* d_out = nullptr;
-    check(cudaMalloc(&d_out, sizeof(float)), "malloc fp32 out");
-    check(cudaMemset(d_out, 0, sizeof(float)), "memset fp32 out");
-
-    auto launch = [&]() { fma_fp32<<<grid, block>>>(d_out, iters); };
-
-    double sec = time_kernel(launch, /*warmup=*/5, /*reps=*/50);
-    check(cudaDeviceSynchronize(), "sync fp32");
-
-    check(cudaFree(d_out), "free fp32 out");
-
-    // 2 FMAs per iter, 2 FLOPs per FMA => 4 FLOPs/iter.
-    double threads = (double)grid * (double)block;
-    double flops = threads * (double)iters * 4.0;
-    return (flops / sec) / 1e9;
-}
-
-static double run_fp64_gflops(int grid, int block, int iters) {
-    double* d_out = nullptr;
-    check(cudaMalloc(&d_out, sizeof(double)), "malloc fp64 out");
-    check(cudaMemset(d_out, 0, sizeof(double)), "memset fp64 out");
-
-    auto launch = [&]() { fma_fp64<<<grid, block>>>(d_out, iters); };
-
-    double sec = time_kernel(launch, /*warmup=*/5, /*reps=*/50);
-    check(cudaDeviceSynchronize(), "sync fp64");
-
-    check(cudaFree(d_out), "free fp64 out");
-
-    double threads = (double)grid * (double)block;
-    double flops = threads * (double)iters * 4.0;
-    return (flops / sec) / 1e9;
+EnergyRunResult run_compute_case_for_energy(const char* dtype, int block, int grid, int iters, double target_duration_ms) {
+    ComputeCaseRunner runner(dtype, block, grid, iters);
+    return runner.run_for_energy(target_duration_ms);
 }
 
 static void write_compute_row(FILE* f, const char* dtype, int block, int grid, int iters) {
-    double gflops = 0.0;
-    if (std::strcmp(dtype, "fp32") == 0) {
-        gflops = run_fp32_gflops(grid, block, iters);
-    } else if (std::strcmp(dtype, "fp64") == 0) {
-        gflops = run_fp64_gflops(grid, block, iters);
-    } else {
-        std::fprintf(stderr, "Unsupported compute dtype '%s'\n", dtype);
-        std::exit(1);
-    }
+    const double gflops = run_compute_case_gflops(dtype, block, grid, iters);
 
     std::fprintf(f, "%s,%d,%d,%d,%.2f\n", dtype, block, grid, iters, gflops);
     std::fflush(f);

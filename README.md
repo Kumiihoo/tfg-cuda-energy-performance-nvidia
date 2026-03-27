@@ -10,21 +10,21 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `gemm`: cuBLAS SGEMM with TF32 on/off
 - Power telemetry via `nvidia-smi`
 - Plot generation scripts (per-GPU and cross-GPU)
-- Active-power efficiency summary with per-target power logs
+- Stable-window efficiency summary with per-target power logs and benchmark-delimited metadata
 - CSV validators for reproducibility checks
 - End-to-end automation by environment
 
 ## Project layout
 
 - `src/`
-  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`) with auto output routing by GPU type
+  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`, `--energy-duration-ms`, `--energy-meta-out`) with auto output routing by GPU type
   - `device_info.cu`: GPU inventory and checks
   - `bw_bench.cu`: BW sweep with VRAM-aware size cap
   - `compute_bench.cu`: compute sweep with SM-aware grid size
-  - `gemm_bench.cu`: cuBLAS SGEMM benchmark
+  - `gemm_bench.cu`: cuBLAS SGEMM benchmark with in-process long-run energy mode
 - `scripts/`
   - `power_logger.sh`: power logging helper
-  - `energy_active_summary.py`: active-power efficiency summary
+  - `energy_active_summary.py`: benchmark-delimited stable-window efficiency summary
   - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`: per-benchmark plot generators
   - `plot_compare_envs.py`: A100 vs RTX5000 comparison CSV + plots
   - `validate_results.py`: single-environment CSV sanity validator
@@ -67,7 +67,7 @@ cmake --build build/rtx5000 -j
 
 ## One-command automation (per environment)
 
-Run full campaign for one environment (build, baseline, power logs, efficiency, plots, validation). Profiling is opt-in:
+Run full campaign for one environment (build, baseline, long-run power logs, efficiency, plots, validation). Profiling is opt-in:
 
 ```bash
 chmod +x scripts/run_campaign.sh
@@ -84,7 +84,10 @@ Useful flags:
 # Skip build if already compiled in build/a100 or build/rtx5000
 ./scripts/run_campaign.sh --env a100 --skip-build
 
-# Resume post-baseline stages only (power, summary, plots, validation)
+# Increase long-run duration for energy measurements
+./scripts/run_campaign.sh --env rtx5000 --energy-duration-ms 3000
+
+# Resume post-baseline stages only (energy, summary, plots, validation)
 ./scripts/run_campaign.sh --env rtx5000 --skip-build --skip-baseline
 
 # Capture Nsight Systems BW/Compute/GEMM traces with timestamp at end of campaign
@@ -100,7 +103,7 @@ Each campaign stores execution metadata in:
 results/<env>/env/run_config.txt
 ```
 
-This file is part of the reproducibility artifacts (host, GPU, driver/CUDA versions, repeats, flags, command line, paths).
+This file is part of the reproducibility artifacts (host, GPU, driver/CUDA versions, sampling period, long-run duration, trim ratio, flags, command line, paths).
 
 ## Cross-environment comparison (A100 vs RTX5000)
 
@@ -221,8 +224,11 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - BW traffic is reported as read + write for copy kernel.
 - BW summaries distinguish `BW peak` (max observed GB/s) from `BW sustained` (last, largest-size sweep point).
 - Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`).
+- Energy runs execute each selected case in-process until the requested duration is reached, instead of stitching together many short process invocations.
+- Each energy case writes a metadata CSV with measured work time, wall time, case repeats, and benchmark start/end timestamps.
 - Power telemetry comes from `nvidia-smi` and reflects GPU-board power only; this project does not measure whole-node/system power.
 - Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
-- Active-power filtering uses an adaptive threshold based on observed SM clock.
+- Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps, then trim the configured fraction from the beginning and end of that run window.
+- SM clock is retained as a diagnostic signal, not as the primary definition of activity.

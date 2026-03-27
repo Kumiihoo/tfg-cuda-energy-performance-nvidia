@@ -120,11 +120,13 @@ def validate_energy(path: Path) -> None:
         "Perf",
         "Active power (W)",
         "Efficiency (unit/W)",
-        "Active threshold (MHz)",
-        "Active samples (%)",
-        "Samples",
-        "Peak SM observed (MHz)",
-        "Fallback all samples",
+        "Run duration (ms)",
+        "Window duration (ms)",
+        "Window samples",
+        "Trim ratio",
+        "Fallback window",
+        "Mean SM in window",
+        "Peak SM in window",
     }
     legacy = {
         "Test",
@@ -135,7 +137,7 @@ def validate_energy(path: Path) -> None:
     }
 
     cols = set(rows[0].keys())
-    if cols == modern:
+    if modern.issubset(cols):
         perf_key = "Perf"
         need_samples = True
         expected_tests = set(TEST_ORDER)
@@ -147,7 +149,7 @@ def validate_energy(path: Path) -> None:
             "GEMM TF32=0 max": "GFLOP/s",
             "GEMM TF32=1 max": "GFLOP/s",
         }
-    elif cols == legacy:
+    elif legacy.issubset(cols):
         perf_key = "Perf (baseline)"
         need_samples = False
         expected_tests = {
@@ -165,7 +167,7 @@ def validate_energy(path: Path) -> None:
             "GEMM TF32=1 max": "GFLOP/s",
         }
     else:
-        fail(f"{path}: expected columns {sorted(modern)} or {sorted(legacy)}, got {list(rows[0].keys())}")
+        fail(f"{path}: missing required modern columns {sorted(modern)} and legacy columns {sorted(legacy)}")
 
     tests = [r["Test"].strip() for r in rows]
     if set(tests) != expected_tests or len(tests) != len(expected_tests):
@@ -181,8 +183,20 @@ def validate_energy(path: Path) -> None:
             fail(f"{path}: Active power must be > 0")
         if to_float(path, r, "Efficiency (unit/W)") <= 0:
             fail(f"{path}: Efficiency must be > 0")
-        if need_samples and to_int(path, r, "Samples") <= 0:
-            fail(f"{path}: Samples must be > 0")
+        if need_samples:
+            if to_float(path, r, "Run duration (ms)") <= 0:
+                fail(f"{path}: Run duration (ms) must be > 0")
+            if to_float(path, r, "Window duration (ms)") < 0:
+                fail(f"{path}: Window duration (ms) must be >= 0")
+            if to_int(path, r, "Window samples") <= 0:
+                fail(f"{path}: Window samples must be > 0")
+            trim_ratio = to_float(path, r, "Trim ratio")
+            if trim_ratio < 0 or trim_ratio >= 0.5:
+                fail(f"{path}: Trim ratio must be in [0, 0.5)")
+            if to_float(path, r, "Mean SM in window") <= 0:
+                fail(f"{path}: Mean SM in window must be > 0")
+            if to_float(path, r, "Peak SM in window") <= 0:
+                fail(f"{path}: Peak SM in window must be > 0")
 
 
 def main() -> None:

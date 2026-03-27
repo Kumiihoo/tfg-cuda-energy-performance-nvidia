@@ -94,12 +94,12 @@ def load_env_metadata(env_name: str, env_root: Path) -> dict[str, str]:
         "nvcc_version": cfg.get("nvcc_version", extract_nvcc_version(nvcc_text) or "unknown"),
         "python_version": cfg.get("python_version", first_nonempty_line(python_text) or "unknown"),
         "sample_ms": cfg.get("sample_ms", "unknown"),
-        "bw_repeats": cfg.get("bw_repeats", "unknown"),
-        "compute_repeats": cfg.get("compute_repeats", "unknown"),
-        "gemm_repeats": cfg.get("gemm_repeats", "unknown"),
+        "energy_duration_ms": cfg.get("energy_duration_ms", "unknown"),
+        "stable_window_trim": cfg.get("stable_window_trim", "unknown"),
         "power_telemetry_source": cfg.get("power_telemetry_source", "nvidia-smi"),
         "power_scope": cfg.get("power_scope", "gpu_board"),
         "node_power_not_measured": cfg.get("node_power_not_measured", "1"),
+        "activity_definition": cfg.get("activity_definition", "unknown"),
     }
 
 
@@ -114,12 +114,12 @@ def build_env_compare(a100_meta: dict[str, str], rtx_meta: dict[str, str]) -> pd
         ("software", "nvcc_version", True),
         ("software", "python_version", True),
         ("measurement", "sample_ms", True),
-        ("measurement", "bw_repeats", True),
-        ("measurement", "compute_repeats", True),
-        ("measurement", "gemm_repeats", True),
+        ("measurement", "energy_duration_ms", True),
+        ("measurement", "stable_window_trim", True),
         ("measurement", "power_telemetry_source", True),
         ("measurement", "power_scope", True),
         ("measurement", "node_power_not_measured", True),
+        ("measurement", "activity_definition", True),
     ]
 
     rows: list[dict[str, object]] = []
@@ -167,6 +167,7 @@ def write_methodology_notes(compare_meta: pd.DataFrame, out_path: Path) -> None:
             "Measurement scope:",
             "- Power telemetry comes from nvidia-smi.",
             "- The reported power scope is GPU-board only; whole-node/system power is not measured by this project.",
+            "- Energy efficiency is computed from the benchmark-delimited stable window, not from a global SM-clock activity filter.",
             "- Cross-environment comparisons should therefore be interpreted as GPU-centric, not node-level energy efficiency.",
         ]
     )

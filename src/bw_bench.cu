@@ -1,6 +1,9 @@
+#include "bench_api.h"
+
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -32,62 +35,136 @@ static bool try_alloc(float** ptr, size_t bytes, const char* tag) {
     return false;
 }
 
-double run_bw_bytes_per_s(size_t bytes, int iters, int block) {
-    size_t n = bytes / sizeof(float);
-    if (n == 0) return -1.0;
+class BwCaseRunner {
+public:
+    BwCaseRunner(size_t bytes, int iters, int block) : bytes_(bytes), iters_(iters), block_(block) {
+        n_ = bytes_ / sizeof(float);
+        if (n_ == 0) {
+            std::fprintf(stderr, "BW case requires at least one float element\n");
+            std::exit(1);
+        }
 
-    float* d_in = nullptr;
-    float* d_out = nullptr;
+        if (!try_alloc(&d_in_, n_ * sizeof(float), "cudaMalloc d_in")) {
+            std::exit(1);
+        }
+        if (!try_alloc(&d_out_, n_ * sizeof(float), "cudaMalloc d_out")) {
+            check(cudaFree(d_in_), "cudaFree d_in after d_out fail");
+            std::exit(1);
+        }
 
-    if (!try_alloc(&d_in, n * sizeof(float), "cudaMalloc d_in")) return -1.0;
-    if (!try_alloc(&d_out, n * sizeof(float), "cudaMalloc d_out")) {
-        check(cudaFree(d_in), "cudaFree d_in after d_out fail");
-        return -1.0;
+        check(cudaMemset(d_in_, 0, n_ * sizeof(float)), "cudaMemset d_in");
+        check(cudaMemset(d_out_, 0, n_ * sizeof(float)), "cudaMemset d_out");
+
+        grid_ = (int)((n_ + (size_t)block_ - 1) / (size_t)block_);
+
+        check(cudaEventCreate(&start_), "event create start");
+        check(cudaEventCreate(&stop_), "event create stop");
+
+        warmup();
     }
 
-    check(cudaMemset(d_in, 0, n * sizeof(float)), "cudaMemset d_in");
-    check(cudaMemset(d_out, 0, n * sizeof(float)), "cudaMemset d_out");
+    ~BwCaseRunner() {
+        if (start_) cudaEventDestroy(start_);
+        if (stop_) cudaEventDestroy(stop_);
+        if (d_in_) cudaFree(d_in_);
+        if (d_out_) cudaFree(d_out_);
+    }
 
-    int grid = (int)((n + (size_t)block - 1) / (size_t)block);
+    double measure_case_gbs() {
+        return bytes_to_gbs(case_bytes_traffic(), run_case_repeats_ms(1));
+    }
 
-    for (int i = 0; i < 5; i++) copy_kernel<<<grid, block>>>(d_in, d_out, n);
-    check(cudaGetLastError(), "warmup launch");
-    check(cudaDeviceSynchronize(), "warmup sync");
+    EnergyRunResult run_for_energy(double target_duration_ms) {
+        const double estimate_ms = std::max(estimate_case_ms(), 0.001);
+        long long case_repeats = std::max<long long>(
+            1, static_cast<long long>(std::ceil((target_duration_ms / estimate_ms) * 1.10)));
 
-    cudaEvent_t start, stop;
-    check(cudaEventCreate(&start), "event create start");
-    check(cudaEventCreate(&stop), "event create stop");
+        double measured_ms = run_case_repeats_ms(case_repeats);
+        while (measured_ms + 1e-6 < target_duration_ms) {
+            const double batch_ms = std::max(measured_ms / static_cast<double>(case_repeats), 0.001);
+            const long long extra_repeats = std::max<long long>(
+                1, static_cast<long long>(std::ceil(((target_duration_ms - measured_ms) / batch_ms) * 1.10)));
+            measured_ms += run_case_repeats_ms(extra_repeats);
+            case_repeats += extra_repeats;
+        }
 
-    check(cudaEventRecord(start), "event record start");
-    for (int i = 0; i < iters; i++) copy_kernel<<<grid, block>>>(d_in, d_out, n);
-    check(cudaGetLastError(), "timed launch");
-    check(cudaEventRecord(stop), "event record stop");
-    check(cudaEventSynchronize(stop), "event sync stop");
+        return EnergyRunResult{
+            bytes_to_gbs(case_bytes_traffic() * static_cast<double>(case_repeats), measured_ms),
+            measured_ms,
+            case_repeats,
+        };
+    }
 
-    float ms = 0.0f;
-    check(cudaEventElapsedTime(&ms, start, stop), "elapsed time");
+private:
+    void warmup() {
+        launch_case_once();
+        launch_case_once();
+        check(cudaGetLastError(), "warmup launch");
+        check(cudaDeviceSynchronize(), "warmup sync");
+    }
 
-    check(cudaEventDestroy(start), "event destroy start");
-    check(cudaEventDestroy(stop), "event destroy stop");
-    check(cudaFree(d_in), "cudaFree d_in");
-    check(cudaFree(d_out), "cudaFree d_out");
+    void launch_case_once() {
+        for (int i = 0; i < iters_; ++i) {
+            copy_kernel<<<grid_, block_>>>(d_in_, d_out_, n_);
+        }
+    }
 
-    double seconds = ms / 1000.0;
-    if (seconds <= 0.0) return -1.0;
+    double estimate_case_ms() {
+        return run_case_repeats_ms(1);
+    }
 
-    // Approximate DRAM traffic for copy kernel: read + write.
-    double total_bytes = (double)bytes * (double)iters * 2.0;
-    return total_bytes / seconds;
+    double run_case_repeats_ms(long long case_repeats) {
+        check(cudaEventRecord(start_), "event record start");
+        for (long long repeat = 0; repeat < case_repeats; ++repeat) {
+            launch_case_once();
+        }
+        check(cudaGetLastError(), "timed launch");
+        check(cudaEventRecord(stop_), "event record stop");
+        check(cudaEventSynchronize(stop_), "event sync stop");
+
+        float ms = 0.0f;
+        check(cudaEventElapsedTime(&ms, start_, stop_), "elapsed time");
+        return static_cast<double>(ms);
+    }
+
+    double case_bytes_traffic() const {
+        return static_cast<double>(bytes_) * static_cast<double>(iters_) * 2.0;
+    }
+
+    static double bytes_to_gbs(double total_bytes, double ms) {
+        const double seconds = ms / 1000.0;
+        if (seconds <= 0.0) return -1.0;
+        return (total_bytes / seconds) / 1e9;
+    }
+
+    size_t bytes_ = 0;
+    int iters_ = 0;
+    int block_ = 0;
+    size_t n_ = 0;
+    int grid_ = 0;
+    float* d_in_ = nullptr;
+    float* d_out_ = nullptr;
+    cudaEvent_t start_ = nullptr;
+    cudaEvent_t stop_ = nullptr;
+};
+
+double run_bw_case_gbs(size_t bytes, int iters, int block) {
+    BwCaseRunner runner(bytes, iters, block);
+    return runner.measure_case_gbs();
+}
+
+EnergyRunResult run_bw_case_for_energy(size_t bytes, int iters, int block, double target_duration_ms) {
+    BwCaseRunner runner(bytes, iters, block);
+    return runner.run_for_energy(target_duration_ms);
 }
 
 static void write_bw_row(FILE* f, size_t bytes, int iters, int block) {
-    double bps = run_bw_bytes_per_s(bytes, iters, block);
-    if (bps <= 0.0) {
+    double gbs = run_bw_case_gbs(bytes, iters, block);
+    if (gbs <= 0.0) {
         std::fprintf(stderr, "BW bytes=%zu failed or was skipped\n", bytes);
         std::exit(1);
     }
 
-    double gbs = bps / 1e9;
     std::fprintf(f, "%zu,%d,%d,%.3f\n", bytes, iters, block, gbs);
     std::fflush(f);
     std::printf("BW bytes=%zu -> %.3f GB/s\n", bytes, gbs);

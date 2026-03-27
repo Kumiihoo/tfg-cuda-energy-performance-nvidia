@@ -33,7 +33,14 @@ class PerfTarget:
     perf_unit: str
     perf: float
     power_log_name: str
+    meta_log_name: str
     bench_args: tuple[str, ...]
+
+
+def _meta_name_from_power_log(power_log_name: str) -> str:
+    if power_log_name.endswith(".csv"):
+        return power_log_name[:-4] + "_meta.csv"
+    return power_log_name + "_meta.csv"
 
 
 def choose_perf_file(perf_dir: Path, stem: str) -> Path:
@@ -102,6 +109,7 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
             perf_unit="GB/s",
             perf=float(bw_peak_row["GBs"]),
             power_log_name="power_bw_peak_long.csv",
+            meta_log_name=_meta_name_from_power_log("power_bw_peak_long.csv"),
             bench_args=(
                 "--mode",
                 "bw",
@@ -119,6 +127,7 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
             perf_unit="GB/s",
             perf=float(bw_sustained_row["GBs"]),
             power_log_name="power_bw_sustained_long.csv",
+            meta_log_name=_meta_name_from_power_log("power_bw_sustained_long.csv"),
             bench_args=(
                 "--mode",
                 "bw",
@@ -147,6 +156,7 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
                 perf_unit="GFLOP/s",
                 perf=float(row["GFLOPs"]),
                 power_log_name=power_log_name,
+                meta_log_name=_meta_name_from_power_log(power_log_name),
                 bench_args=(
                     "--mode",
                     "compute",
@@ -177,6 +187,7 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
                 perf_unit="GFLOP/s",
                 perf=float(row["GFLOPs"]),
                 power_log_name=power_log_name,
+                meta_log_name=_meta_name_from_power_log(power_log_name),
                 bench_args=(
                     "--mode",
                     "gemm",
@@ -205,7 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--field",
         required=True,
-        choices=["args", "perf", "perf-unit", "power-log", "test"],
+        choices=["args", "perf", "perf-unit", "power-log", "meta-log", "test"],
         help="Target field to print",
     )
     return parser.parse_args()
@@ -226,6 +237,8 @@ def main() -> None:
         print(target.perf_unit)
     elif args.field == "power-log":
         print(target.power_log_name)
+    elif args.field == "meta-log":
+        print(target.meta_log_name)
     elif args.field == "test":
         print(target.test)
 

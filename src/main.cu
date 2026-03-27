@@ -1,7 +1,11 @@
+#include "bench_api.h"
+
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -9,15 +13,6 @@
 #include <sys/types.h>
 
 #include <cuda_runtime.h>
-
-void print_device_info();
-
-void run_bw_sweep_to_csv(const char* path);
-void run_bw_case_to_csv(const char* path, size_t bytes, int iters, int block);
-void run_compute_sweep_to_csv(const char* path);
-void run_compute_case_to_csv(const char* path, const char* dtype, int block, int grid, int iters);
-void run_gemm_sweep_to_csv(const char* path);
-void run_gemm_case_to_csv(const char* path, int N, int iters, bool tf32);
 
 static bool valid_mode(const std::string& mode) {
     return mode == "all" || mode == "bw" || mode == "compute" || mode == "gemm";
@@ -59,11 +54,14 @@ static std::string join_path(const std::string& dir, const std::string& file) {
     return dir + "/" + file;
 }
 
+static std::string parent_dir(const std::string& path) {
+    const size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos) return "";
+    return path.substr(0, slash);
+}
+
 static bool ensure_dir_recursive(const std::string& dir, std::string* err) {
-    if (dir.empty()) {
-        if (err) *err = "empty path";
-        return false;
-    }
+    if (dir.empty()) return true;
 
     std::string current;
     if (!dir.empty() && dir[0] == '/') current = "/";
@@ -107,10 +105,110 @@ static std::string detect_env_folder() {
     return "other_gpu";
 }
 
+static std::string csv_escape(const std::string& value) {
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '"') out += '"';
+        out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+static std::string format_utc_timestamp(std::chrono::system_clock::time_point tp) {
+    using namespace std::chrono;
+    const auto ms = duration_cast<milliseconds>(tp.time_since_epoch()) % 1000;
+    const std::time_t tt = system_clock::to_time_t(tp);
+
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+
+    char base[32];
+    std::strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
+
+    char out[40];
+    std::snprintf(out, sizeof(out), "%s.%03lldZ", base, static_cast<long long>(ms.count()));
+    return out;
+}
+
+static void write_bw_result_csv(const std::string& path, size_t bytes, int iters, int block, double gbs) {
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+    std::fprintf(f, "bytes,iters,block,GBs\n");
+    std::fprintf(f, "%zu,%d,%d,%.3f\n", bytes, iters, block, gbs);
+    std::fclose(f);
+}
+
+static void write_compute_result_csv(const std::string& path, const std::string& dtype, int block, int grid, int iters,
+                                     double gflops) {
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+    std::fprintf(f, "dtype,block,grid,iters,GFLOPs\n");
+    std::fprintf(f, "%s,%d,%d,%d,%.2f\n", dtype.c_str(), block, grid, iters, gflops);
+    std::fclose(f);
+}
+
+static void write_gemm_result_csv(const std::string& path, int n, int iters, bool tf32, double gflops) {
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+    std::fprintf(f, "N,iters,tf32,GFLOPs\n");
+    std::fprintf(f, "%d,%d,%d,%.2f\n", n, iters, tf32 ? 1 : 0, gflops);
+    std::fclose(f);
+}
+
+static void write_energy_meta_csv(const std::string& path,
+                                  const std::string& case_key,
+                                  const std::string& params,
+                                  const std::string& perf_unit,
+                                  double avg_perf,
+                                  double target_duration_ms,
+                                  double measured_work_ms,
+                                  double wall_ms,
+                                  long long case_repeats,
+                                  const std::string& run_start_utc,
+                                  const std::string& run_end_utc) {
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+
+    std::fprintf(f,
+                 "case_key,params,perf_unit,avg_perf,target_duration_ms,measured_work_ms,wall_ms,case_repeats,run_start_utc,run_end_utc\n");
+    std::fprintf(f, "%s,%s,%s,%.6f,%.3f,%.3f,%.3f,%lld,%s,%s\n",
+                 csv_escape(case_key).c_str(),
+                 csv_escape(params).c_str(),
+                 csv_escape(perf_unit).c_str(),
+                 avg_perf,
+                 target_duration_ms,
+                 measured_work_ms,
+                 wall_ms,
+                 case_repeats,
+                 csv_escape(run_start_utc).c_str(),
+                 csv_escape(run_end_utc).c_str());
+    std::fclose(f);
+}
+
 static void usage(const char* prog) {
     std::printf(
         "Usage: %s [--mode all|bw|compute|gemm] [--out-dir PATH] [--tag NAME] [advanced case flags]\n"
         "Default out-dir: auto -> results/<a100|rtx5000|other_gpu>/baseline\n"
+        "Energy mode:\n"
+        "  --energy-duration-ms N   Target duration for in-process long-run measurement (case mode only)\n"
+        "  --energy-meta-out PATH   Metadata CSV written for energy mode (required with --energy-duration-ms)\n"
         "Advanced case flags:\n"
         "  BW:      --bw-bytes N --bw-iters N --bw-block N\n"
         "  Compute: --compute-dtype fp32|fp64 --compute-block N --compute-grid N --compute-iters N\n"
@@ -118,21 +216,27 @@ static void usage(const char* prog) {
         "Examples:\n"
         "  %s --mode all\n"
         "  %s --mode gemm --out-dir results/a100/baseline\n"
-        "  %s --mode compute --compute-dtype fp32 --compute-block 1024 --compute-grid 864 --compute-iters 4096\n",
-        prog, prog, prog, prog);
+        "  %s --mode compute --compute-dtype fp32 --compute-block 1024 --compute-grid 864 --compute-iters 4096\n"
+        "  %s --mode bw --bw-bytes 1048576 --bw-iters 200 --bw-block 256 --energy-duration-ms 2000 \\\n"
+        "     --energy-meta-out results/a100/energy/power_bw_peak_long_meta.csv\n",
+        prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv) {
     std::string mode = "all";
     std::string out_dir;
     std::string tag;
+    std::string energy_meta_out;
     bool out_dir_given = false;
     size_t bw_bytes = 0;
     int bw_iters = 0;
     int bw_block = 0;
+    int energy_duration_ms = 0;
     bool bw_bytes_given = false;
     bool bw_iters_given = false;
     bool bw_block_given = false;
+    bool energy_duration_given = false;
+    bool energy_meta_out_given = false;
     std::string compute_dtype;
     int compute_block = 0;
     int compute_grid = 0;
@@ -157,6 +261,15 @@ int main(int argc, char** argv) {
             out_dir_given = true;
         } else if (arg == "--tag" && i + 1 < argc) {
             tag = argv[++i];
+        } else if (arg == "--energy-duration-ms" && i + 1 < argc) {
+            energy_duration_given = parse_int_arg(argv[++i], &energy_duration_ms);
+            if (!energy_duration_given || energy_duration_ms <= 0) {
+                std::fprintf(stderr, "Invalid value for --energy-duration-ms\n");
+                return 1;
+            }
+        } else if (arg == "--energy-meta-out" && i + 1 < argc) {
+            energy_meta_out = argv[++i];
+            energy_meta_out_given = true;
         } else if (arg == "--bw-bytes" && i + 1 < argc) {
             bw_bytes_given = parse_size_arg(argv[++i], &bw_bytes);
             if (!bw_bytes_given) {
@@ -229,6 +342,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const bool energy_mode = energy_duration_given || energy_meta_out_given;
+
     const bool bw_case = bw_bytes_given || bw_iters_given || bw_block_given;
     if (bw_case) {
         if (mode != "bw") {
@@ -274,6 +389,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (energy_mode) {
+        if (!(energy_duration_given && energy_meta_out_given)) {
+            std::fprintf(stderr, "Energy mode requires both --energy-duration-ms and --energy-meta-out\n");
+            return 1;
+        }
+        if (mode == "all") {
+            std::fprintf(stderr, "Energy mode is only supported for case-specific bw/compute/gemm executions\n");
+            return 1;
+        }
+        if ((mode == "bw" && !bw_case) || (mode == "compute" && !compute_case) || (mode == "gemm" && !gemm_case)) {
+            std::fprintf(stderr, "Energy mode requires a fully specified benchmark case\n");
+            return 1;
+        }
+    }
+
     if (!out_dir_given) {
         const std::string env_folder = detect_env_folder();
         out_dir = join_path(join_path("results", env_folder), "baseline");
@@ -289,11 +419,77 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (energy_mode) {
+        const std::string meta_parent = parent_dir(energy_meta_out);
+        if (!ensure_dir_recursive(meta_parent, &mkdir_err)) {
+            std::fprintf(stderr, "Cannot create metadata directory '%s': %s\n", meta_parent.c_str(), mkdir_err.c_str());
+            return 1;
+        }
+    }
+
     print_device_info();
 
     const std::string bw_path = join_path(base_out, "bw.csv");
     const std::string compute_path = join_path(base_out, "compute.csv");
     const std::string gemm_path = join_path(base_out, "gemm.csv");
+
+    if (energy_mode) {
+        std::string case_key;
+        std::string params;
+        std::string perf_unit;
+        EnergyRunResult result{};
+
+        const auto run_start = std::chrono::system_clock::now();
+        if (mode == "bw") {
+            case_key = "bw";
+            params = "--bw-bytes " + std::to_string(bw_bytes) +
+                     " --bw-iters " + std::to_string(bw_iters) +
+                     " --bw-block " + std::to_string(bw_block);
+            perf_unit = "GB/s";
+            result = run_bw_case_for_energy(bw_bytes, bw_iters, bw_block, static_cast<double>(energy_duration_ms));
+            write_bw_result_csv(bw_path, bw_bytes, bw_iters, bw_block, result.avg_perf);
+            std::printf("BW long-run avg -> %.3f GB/s\n", result.avg_perf);
+            std::printf("Wrote %s\n", bw_path.c_str());
+        } else if (mode == "compute") {
+            case_key = "compute";
+            params = "--compute-dtype " + compute_dtype +
+                     " --compute-block " + std::to_string(compute_block) +
+                     " --compute-grid " + std::to_string(compute_grid) +
+                     " --compute-iters " + std::to_string(compute_iters);
+            perf_unit = "GFLOP/s";
+            result = run_compute_case_for_energy(compute_dtype.c_str(), compute_block, compute_grid, compute_iters,
+                                                 static_cast<double>(energy_duration_ms));
+            write_compute_result_csv(compute_path, compute_dtype, compute_block, compute_grid, compute_iters, result.avg_perf);
+            std::printf("%s long-run avg -> %.2f GFLOP/s\n", compute_dtype.c_str(), result.avg_perf);
+            std::printf("Wrote %s\n", compute_path.c_str());
+        } else if (mode == "gemm") {
+            case_key = "gemm";
+            params = "--gemm-n " + std::to_string(gemm_n) +
+                     " --gemm-iters " + std::to_string(gemm_iters) +
+                     " --gemm-tf32 " + std::to_string(gemm_tf32);
+            perf_unit = "GFLOP/s";
+            result = run_gemm_case_for_energy(gemm_n, gemm_iters, gemm_tf32 == 1, static_cast<double>(energy_duration_ms));
+            write_gemm_result_csv(gemm_path, gemm_n, gemm_iters, gemm_tf32 == 1, result.avg_perf);
+            std::printf("GEMM long-run avg -> %.2f GFLOP/s\n", result.avg_perf);
+            std::printf("Wrote %s\n", gemm_path.c_str());
+        }
+        const auto run_end = std::chrono::system_clock::now();
+
+        const double wall_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(run_end - run_start).count();
+        write_energy_meta_csv(energy_meta_out,
+                              case_key,
+                              params,
+                              perf_unit,
+                              result.avg_perf,
+                              static_cast<double>(energy_duration_ms),
+                              result.measured_work_ms,
+                              wall_ms,
+                              result.case_repeats,
+                              format_utc_timestamp(run_start),
+                              format_utc_timestamp(run_end));
+        std::printf("Wrote %s\n", energy_meta_out.c_str());
+        return 0;
+    }
 
     if (mode == "bw" || mode == "all") {
         if (bw_case) {

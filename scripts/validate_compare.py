@@ -103,8 +103,8 @@ def check_env_compare(path: Path) -> None:
         fail(f"No rows in {path}")
 
     cols = set(df.columns)
-    if cols != ENV_COMPARE_COLUMNS:
-        fail(f"{path}: expected columns {sorted(ENV_COMPARE_COLUMNS)}, got {list(df.columns)}")
+    if not ENV_COMPARE_COLUMNS.issubset(cols):
+        fail(f"{path}: missing required columns {sorted(ENV_COMPARE_COLUMNS)}, got {list(df.columns)}")
 
     statuses = set(df["status"].astype(str))
     if not statuses.issubset(ENV_COMPARE_STATUSES):
@@ -120,16 +120,16 @@ def check_env_compare(path: Path) -> None:
         "nvcc_version",
         "python_version",
         "sample_ms",
-        "bw_repeats",
-        "compute_repeats",
-        "gemm_repeats",
+        "energy_duration_ms",
+        "stable_window_trim",
         "power_telemetry_source",
         "power_scope",
         "node_power_not_measured",
+        "activity_definition",
     }
     fields = set(df["field"].astype(str))
-    if fields != required_fields:
-        fail(f"{path}: unexpected metadata field set {sorted(fields)}")
+    if not required_fields.issubset(fields):
+        fail(f"{path}: missing metadata fields {sorted(required_fields.difference(fields))}")
 
 
 def main() -> None:
