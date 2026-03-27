@@ -1,3 +1,10 @@
+"""Legacy script kept only for historical comparison with the pre-hardening method.
+
+Do not use this file for current campaigns. The active pipeline is:
+  scripts/run_campaign.sh
+  scripts/energy_active_summary.py
+"""
+
 import pandas as pd
 
 def read_power(path):

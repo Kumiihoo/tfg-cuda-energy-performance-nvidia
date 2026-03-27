@@ -211,7 +211,7 @@ def load_target_map(perf_dir: Path) -> dict[str, PerfTarget]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Emit benchmark target metadata from baseline CSV files")
-    parser.add_argument("--perf-dir", default="results/a100/baseline", help="Directory with bw/compute/gemm CSVs")
+    parser.add_argument("--perf-dir", default="results/a100/baseline", help="Directory with baseline benchmark CSVs")
     parser.add_argument("--case", required=True, help="Target case key")
     parser.add_argument(
         "--field",

@@ -1,11 +1,15 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 
 struct EnergyRunResult {
     double avg_perf = 0.0;
     double measured_work_ms = 0.0;
+    double wall_ms = 0.0;
     long long case_repeats = 0;
+    std::chrono::system_clock::time_point run_start{};
+    std::chrono::system_clock::time_point run_end{};
 };
 
 void print_device_info();

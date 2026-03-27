@@ -18,7 +18,7 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
 ## Project layout
 
 - `src/`
-  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`, `--energy-duration-ms`, `--energy-meta-out`) with case-specific flags for BW/Compute/GEMM/FFT
+  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`, `--energy-duration-ms`, `--energy-meta-out`, optional `--energy-case-key`) with case-specific flags for BW/Compute/GEMM/FFT
   - `bench_api.h`: shared benchmark/energy-run interface used by the CUDA benchmark implementations
   - `device_info.cu`: GPU inventory and checks
   - `bw_bench.cu`: BW sweep with VRAM-aware size cap
@@ -35,6 +35,7 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `validate_compare.py`: cross-environment artifact validator
   - `run_campaign.sh`: one-command end-to-end automation by environment
   - `run_compare.sh`: one-command cross-environment comparison + validation
+  - `archive/`: legacy utilities kept only for historical reference, not for current methodology
 - `results/`
   - `a100/`: A100 artifacts
   - `rtx5000/`: Quadro RTX 5000 artifacts
@@ -234,11 +235,13 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`).
 - Energy runs execute each selected case in-process until the requested duration is reached, instead of stitching together many short process invocations.
 - Each energy case writes a metadata CSV with measured work time, wall time, case repeats, and benchmark start/end timestamps.
+- Campaign runs pass an explicit energy `case_key` into the metadata so each power log can be matched back to the selected baseline target deterministically.
 - Power telemetry comes from `nvidia-smi` and reflects GPU-board power only; this project does not measure whole-node/system power.
 - Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.
 - FFT is currently integrated as a baseline/control benchmark plus cross-environment performance comparison; it is not yet part of the automated energy summary target set.
-- Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps, then trim the configured fraction from the beginning and end of that run window.
+- Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps with strict overlap, then trim the configured fraction from the beginning and end of that run window.
+- In `efficiency_active_summary.csv`, `Perf` now refers to the long-run execution used for power; baseline performance is retained as an audit column so power and efficiency come from the same run.
 - SM clock is retained as a diagnostic signal, not as the primary definition of activity.

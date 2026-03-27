@@ -227,6 +227,7 @@ static void usage(const char* prog) {
         "Energy mode:\n"
         "  --energy-duration-ms N   Target duration for in-process long-run measurement (case mode only)\n"
         "  --energy-meta-out PATH   Metadata CSV written for energy mode (required with --energy-duration-ms)\n"
+        "  --energy-case-key NAME   Optional case identifier stored in energy metadata\n"
         "Advanced case flags:\n"
         "  BW:      --bw-bytes N --bw-iters N --bw-block N\n"
         "  Compute: --compute-dtype fp32|fp64 --compute-block N --compute-grid N --compute-iters N\n"
@@ -247,6 +248,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string tag;
     std::string energy_meta_out;
+    std::string energy_case_key;
     bool out_dir_given = false;
     size_t bw_bytes = 0;
     int bw_iters = 0;
@@ -257,6 +259,7 @@ int main(int argc, char** argv) {
     bool bw_block_given = false;
     bool energy_duration_given = false;
     bool energy_meta_out_given = false;
+    bool energy_case_key_given = false;
     std::string compute_dtype;
     int compute_block = 0;
     int compute_grid = 0;
@@ -296,6 +299,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--energy-meta-out" && i + 1 < argc) {
             energy_meta_out = argv[++i];
             energy_meta_out_given = true;
+        } else if (arg == "--energy-case-key" && i + 1 < argc) {
+            energy_case_key = argv[++i];
+            energy_case_key_given = true;
         } else if (arg == "--bw-bytes" && i + 1 < argc) {
             bw_bytes_given = parse_size_arg(argv[++i], &bw_bytes);
             if (!bw_bytes_given) {
@@ -455,7 +461,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (mode == "all") {
-            std::fprintf(stderr, "Energy mode is only supported for case-specific bw/compute/gemm executions\n");
+            std::fprintf(stderr, "Energy mode is only supported for case-specific bw/compute/gemm/fft executions\n");
             return 1;
         }
         if ((mode == "bw" && !bw_case) || (mode == "compute" && !compute_case) ||
@@ -501,9 +507,11 @@ int main(int argc, char** argv) {
         std::string perf_unit;
         EnergyRunResult result{};
 
-        const auto run_start = std::chrono::system_clock::now();
         if (mode == "bw") {
-            case_key = "bw";
+            case_key = energy_case_key_given
+                           ? energy_case_key
+                           : "bw:bytes=" + std::to_string(bw_bytes) + ",iters=" + std::to_string(bw_iters) +
+                                 ",block=" + std::to_string(bw_block);
             params = "--bw-bytes " + std::to_string(bw_bytes) +
                      " --bw-iters " + std::to_string(bw_iters) +
                      " --bw-block " + std::to_string(bw_block);
@@ -513,7 +521,10 @@ int main(int argc, char** argv) {
             std::printf("BW long-run avg -> %.3f GB/s\n", result.avg_perf);
             std::printf("Wrote %s\n", bw_path.c_str());
         } else if (mode == "compute") {
-            case_key = "compute";
+            case_key = energy_case_key_given
+                           ? energy_case_key
+                           : "compute:dtype=" + compute_dtype + ",block=" + std::to_string(compute_block) +
+                                 ",grid=" + std::to_string(compute_grid) + ",iters=" + std::to_string(compute_iters);
             params = "--compute-dtype " + compute_dtype +
                      " --compute-block " + std::to_string(compute_block) +
                      " --compute-grid " + std::to_string(compute_grid) +
@@ -525,7 +536,10 @@ int main(int argc, char** argv) {
             std::printf("%s long-run avg -> %.2f GFLOP/s\n", compute_dtype.c_str(), result.avg_perf);
             std::printf("Wrote %s\n", compute_path.c_str());
         } else if (mode == "gemm") {
-            case_key = "gemm";
+            case_key = energy_case_key_given
+                           ? energy_case_key
+                           : "gemm:n=" + std::to_string(gemm_n) + ",iters=" + std::to_string(gemm_iters) +
+                                 ",tf32=" + std::to_string(gemm_tf32);
             params = "--gemm-n " + std::to_string(gemm_n) +
                      " --gemm-iters " + std::to_string(gemm_iters) +
                      " --gemm-tf32 " + std::to_string(gemm_tf32);
@@ -535,7 +549,10 @@ int main(int argc, char** argv) {
             std::printf("GEMM long-run avg -> %.2f GFLOP/s\n", result.avg_perf);
             std::printf("Wrote %s\n", gemm_path.c_str());
         } else if (mode == "fft") {
-            case_key = "fft";
+            case_key = energy_case_key_given
+                           ? energy_case_key
+                           : "fft:n=" + std::to_string(fft_n) + ",batch=" + std::to_string(fft_batch) +
+                                 ",iters=" + std::to_string(fft_iters);
             params = "--fft-n " + std::to_string(fft_n) +
                      " --fft-batch " + std::to_string(fft_batch) +
                      " --fft-iters " + std::to_string(fft_iters);
@@ -548,9 +565,6 @@ int main(int argc, char** argv) {
             std::printf("FFT long-run avg -> %.2f MSamples/s\n", result.avg_perf);
             std::printf("Wrote %s\n", fft_path.c_str());
         }
-        const auto run_end = std::chrono::system_clock::now();
-
-        const double wall_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(run_end - run_start).count();
         write_energy_meta_csv(energy_meta_out,
                               case_key,
                               params,
@@ -558,10 +572,10 @@ int main(int argc, char** argv) {
                               result.avg_perf,
                               static_cast<double>(energy_duration_ms),
                               result.measured_work_ms,
-                              wall_ms,
+                              result.wall_ms,
                               result.case_repeats,
-                              format_utc_timestamp(run_start),
-                              format_utc_timestamp(run_end));
+                              format_utc_timestamp(result.run_start),
+                              format_utc_timestamp(result.run_end));
         std::printf("Wrote %s\n", energy_meta_out.c_str());
         return 0;
     }

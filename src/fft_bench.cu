@@ -4,6 +4,7 @@
 #include <cufft.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +52,7 @@ public:
         long long case_repeats = std::max<long long>(
             1, static_cast<long long>(std::ceil((target_duration_ms / estimate_ms) * 1.10)));
 
+        const auto run_start = std::chrono::system_clock::now();
         double measured_ms = run_case_repeats_ms(case_repeats);
         while (measured_ms + 1e-6 < target_duration_ms) {
             const double batch_ms = std::max(measured_ms / static_cast<double>(case_repeats), 0.001);
@@ -59,11 +61,16 @@ public:
             measured_ms += run_case_repeats_ms(extra_repeats);
             case_repeats += extra_repeats;
         }
+        const auto run_end = std::chrono::system_clock::now();
+        const double wall_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(run_end - run_start).count();
 
         return EnergyRunResult{
             total_samples(case_repeats) / (measured_ms / 1000.0) / 1e6,
             measured_ms,
+            wall_ms,
             case_repeats,
+            run_start,
+            run_end,
         };
     }
 
@@ -111,6 +118,13 @@ private:
         const double exec_calls = static_cast<double>(iters_) * static_cast<double>(case_repeats);
         const double transforms = static_cast<double>(batch_) * exec_calls;
         const double samples = static_cast<double>(n_) * transforms;
+
+        if (seconds <= 0.0 || exec_calls <= 0.0) {
+            *time_ms = -1.0;
+            *transforms_per_s = -1.0;
+            *msamples_per_s = -1.0;
+            return;
+        }
 
         *time_ms = measured_ms / exec_calls;
         *transforms_per_s = transforms / seconds;

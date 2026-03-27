@@ -151,15 +151,10 @@ def clip_to_run_window(df: pd.DataFrame, meta: dict[str, object]) -> tuple[pd.Da
     if not clipped.empty:
         return clipped.reset_index(drop=True), False
 
-    # Fallback for timestamp boundary skew between logger and benchmark metadata.
-    slack = pd.Timedelta(milliseconds=1000)
-    clipped = df[(df["ts_local"] >= start_local - slack) & (df["ts_local"] <= end_local + slack)].copy()
-    if clipped.empty:
-        raise ValueError(
-            "No logger samples overlap the benchmark interval "
-            f"[{meta['run_start_utc']}, {meta['run_end_utc']}]"
-        )
-    return clipped.reset_index(drop=True), True
+    raise ValueError(
+        "No logger samples overlap the benchmark interval "
+        f"[{meta['run_start_utc']}, {meta['run_end_utc']}]"
+    )
 
 
 def select_stable_window(df: pd.DataFrame, trim_ratio: float, min_window_samples: int) -> tuple[pd.DataFrame, bool, float]:
@@ -216,6 +211,17 @@ def main() -> None:
         meta_path = power_dir / target.meta_log_name
         power_df = load_power_log(power_path)
         meta = load_energy_meta(meta_path)
+        meta_case_key = str(meta["case_key"]).strip()
+        meta_perf_unit = str(meta["perf_unit"]).strip()
+
+        if meta_perf_unit != target.perf_unit:
+            raise ValueError(
+                f"{meta_path}: perf_unit='{meta_perf_unit}' does not match target perf unit '{target.perf_unit}'"
+            )
+        if meta_case_key and meta_case_key != target.case_key:
+            raise ValueError(
+                f"{meta_path}: case_key='{meta_case_key}' does not match expected target case '{target.case_key}'"
+            )
 
         run_window, fallback_run_window = clip_to_run_window(power_df, meta)
         stable_window, fallback_window, applied_trim = select_stable_window(
@@ -227,15 +233,21 @@ def main() -> None:
             raise ValueError(f"{power_path}: non-positive active power computed for {target.test}")
 
         sm_diag = diagnostic_sm_stats(stable_window, args.active_ratio, args.active_floor_mhz)
-        perf_delta_pct = ((meta["avg_perf"] - target.perf) / target.perf) * 100.0 if target.perf else 0.0
+        energy_perf = float(meta["avg_perf"])
+        baseline_perf = float(target.perf)
+        if energy_perf <= 0.0:
+            raise ValueError(f"{meta_path}: non-positive avg_perf for {target.test}")
+
+        perf_delta_pct = ((energy_perf - baseline_perf) / baseline_perf) * 100.0 if baseline_perf else 0.0
 
         rows.append(
             (
                 target.test,
                 target.perf_unit,
-                target.perf,
+                energy_perf,
                 active_power_w,
-                target.perf / active_power_w,
+                energy_perf / active_power_w,
+                baseline_perf,
                 meta["wall_ms"],
                 duration_ms(stable_window),
                 int(len(stable_window)),
@@ -247,11 +259,11 @@ def main() -> None:
                 meta["measured_work_ms"],
                 meta["target_duration_ms"],
                 meta["case_repeats"],
-                meta["avg_perf"],
                 perf_delta_pct,
                 sm_diag["threshold_mhz"],
                 sm_diag["active_pct"],
                 fallback_run_window,
+                meta_case_key,
                 target.power_log_name,
                 target.meta_log_name,
             )
@@ -265,6 +277,7 @@ def main() -> None:
             "Perf",
             "Active power (W)",
             "Efficiency (unit/W)",
+            "Baseline perf",
             "Run duration (ms)",
             "Window duration (ms)",
             "Window samples",
@@ -276,11 +289,11 @@ def main() -> None:
             "Measured work (ms)",
             "Target duration (ms)",
             "Case repeats",
-            "Energy run perf",
             "Perf delta vs baseline (%)",
             "SM active threshold (MHz)",
             "Window samples above SM threshold (%)",
             "Fallback run window",
+            "Meta case key",
             "Power log",
             "Meta log",
         ],

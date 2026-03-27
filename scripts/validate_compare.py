@@ -71,8 +71,8 @@ def check_summary(path: Path) -> None:
         fail(f"No rows in {path}")
 
     cols = set(df.columns)
-    if cols != REQUIRED_COLUMNS:
-        fail(f"{path}: expected columns {sorted(REQUIRED_COLUMNS)}, got {list(df.columns)}")
+    if not REQUIRED_COLUMNS.issubset(cols):
+        fail(f"{path}: missing required columns {sorted(REQUIRED_COLUMNS.difference(cols))}, got {list(df.columns)}")
 
     metrics = set(df["metric"].astype(str))
     if metrics != EXPECTED_METRICS:

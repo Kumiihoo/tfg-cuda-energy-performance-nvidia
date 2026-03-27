@@ -1,9 +1,10 @@
 from __future__ import annotations
 import argparse
 import csv
+import math
 from pathlib import Path
 
-from perf_targets import TEST_ORDER
+from perf_targets import TEST_ORDER, load_perf_targets
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +43,20 @@ def to_int(path: Path, row: dict[str, str], key: str) -> int:
         return int(float(row[key]))
     except Exception as exc:
         fail(f"{path}: cannot parse '{key}' value '{row.get(key)}' ({exc})")
+
+
+def to_bool(path: Path, row: dict[str, str], key: str) -> bool:
+    value = str(row.get(key, "")).strip().lower()
+    if value in {"true", "1", "yes"}:
+        return True
+    if value in {"false", "0", "no"}:
+        return False
+    fail(f"{path}: cannot parse '{key}' boolean value '{row.get(key)}'")
+
+
+def expect_close(path: Path, label: str, actual: float, expected: float, *, rel_tol: float = 1e-6, abs_tol: float = 1e-6) -> None:
+    if not math.isclose(actual, expected, rel_tol=rel_tol, abs_tol=abs_tol):
+        fail(f"{path}: unexpected {label}: got {actual}, expected {expected}")
 
 
 def validate_bw(path: Path) -> None:
@@ -142,7 +157,7 @@ def validate_fft(path: Path) -> None:
         prev_n = n
 
 
-def validate_energy(path: Path) -> None:
+def validate_energy(path: Path, perf_dir: Path) -> None:
     rows = read_rows(path)
 
     modern = {
@@ -151,6 +166,7 @@ def validate_energy(path: Path) -> None:
         "Perf",
         "Active power (W)",
         "Efficiency (unit/W)",
+        "Baseline perf",
         "Run duration (ms)",
         "Window duration (ms)",
         "Window samples",
@@ -158,6 +174,17 @@ def validate_energy(path: Path) -> None:
         "Fallback window",
         "Mean SM in window",
         "Peak SM in window",
+        "Run samples",
+        "Measured work (ms)",
+        "Target duration (ms)",
+        "Case repeats",
+        "Perf delta vs baseline (%)",
+        "SM active threshold (MHz)",
+        "Window samples above SM threshold (%)",
+        "Fallback run window",
+        "Meta case key",
+        "Power log",
+        "Meta log",
     }
     legacy = {
         "Test",
@@ -171,18 +198,17 @@ def validate_energy(path: Path) -> None:
     if modern.issubset(cols):
         perf_key = "Perf"
         need_samples = True
-        expected_tests = set(TEST_ORDER)
-        expected_units = {
-            "BW peak": "GB/s",
-            "BW sustained": "GB/s",
-            "Compute FP32 peak": "GFLOP/s",
-            "Compute FP64 peak": "GFLOP/s",
-            "GEMM TF32=0 max": "GFLOP/s",
-            "GEMM TF32=1 max": "GFLOP/s",
-        }
+        targets = load_perf_targets(perf_dir)
+        expected_tests_order = [target.test for target in targets]
+        target_by_test = {target.test: target for target in targets}
+        expected_tests = set(expected_tests_order)
+        expected_units = {target.test: target.perf_unit for target in targets}
     elif legacy.issubset(cols):
         perf_key = "Perf (baseline)"
         need_samples = False
+        targets = []
+        target_by_test = {}
+        expected_tests_order = TEST_ORDER
         expected_tests = {
             "BW plateau",
             "Compute FP32 peak",
@@ -203,31 +229,97 @@ def validate_energy(path: Path) -> None:
     tests = [r["Test"].strip() for r in rows]
     if set(tests) != expected_tests or len(tests) != len(expected_tests):
         fail(f"{path}: unexpected test rows {tests}; expected exactly {sorted(expected_tests)}")
+    if need_samples and tests != expected_tests_order:
+        fail(f"{path}: unexpected test order {tests}; expected {expected_tests_order}")
 
     for r in rows:
         test = r["Test"].strip()
         if r["Perf unit"].strip() != expected_units[test]:
             fail(f"{path}: unexpected unit for '{test}': {r['Perf unit']}")
-        if to_float(path, r, perf_key) <= 0:
+        perf_value = to_float(path, r, perf_key)
+        active_power = to_float(path, r, "Active power (W)")
+        efficiency = to_float(path, r, "Efficiency (unit/W)")
+        if perf_value <= 0:
             fail(f"{path}: {perf_key} must be > 0")
-        if to_float(path, r, "Active power (W)") <= 0:
+        if active_power <= 0:
             fail(f"{path}: Active power must be > 0")
-        if to_float(path, r, "Efficiency (unit/W)") <= 0:
+        if efficiency <= 0:
             fail(f"{path}: Efficiency must be > 0")
+        expect_close(path, f"efficiency for '{test}'", efficiency, perf_value / active_power)
         if need_samples:
-            if to_float(path, r, "Run duration (ms)") <= 0:
-                fail(f"{path}: Run duration (ms) must be > 0")
-            if to_float(path, r, "Window duration (ms)") < 0:
-                fail(f"{path}: Window duration (ms) must be >= 0")
-            if to_int(path, r, "Window samples") <= 0:
-                fail(f"{path}: Window samples must be > 0")
+            target = target_by_test[test]
+            baseline_perf = to_float(path, r, "Baseline perf")
+            run_duration = to_float(path, r, "Run duration (ms)")
+            window_duration = to_float(path, r, "Window duration (ms)")
+            window_samples = to_int(path, r, "Window samples")
+            run_samples = to_int(path, r, "Run samples")
             trim_ratio = to_float(path, r, "Trim ratio")
+            mean_sm = to_float(path, r, "Mean SM in window")
+            peak_sm = to_float(path, r, "Peak SM in window")
+            measured_work = to_float(path, r, "Measured work (ms)")
+            target_duration = to_float(path, r, "Target duration (ms)")
+            case_repeats = to_int(path, r, "Case repeats")
+            perf_delta_pct = to_float(path, r, "Perf delta vs baseline (%)")
+            sm_threshold = to_float(path, r, "SM active threshold (MHz)")
+            active_pct = to_float(path, r, "Window samples above SM threshold (%)")
+            fallback_window = to_bool(path, r, "Fallback window")
+            fallback_run_window = to_bool(path, r, "Fallback run window")
+            meta_case_key = r["Meta case key"].strip()
+            power_log = r["Power log"].strip()
+            meta_log = r["Meta log"].strip()
+
+            expect_close(path, f"baseline perf for '{test}'", baseline_perf, float(target.perf))
+            if meta_case_key != target.case_key:
+                fail(f"{path}: unexpected Meta case key for '{test}': {meta_case_key}")
+            if power_log != target.power_log_name:
+                fail(f"{path}: unexpected Power log for '{test}': {power_log}")
+            if meta_log != target.meta_log_name:
+                fail(f"{path}: unexpected Meta log for '{test}': {meta_log}")
+
+            if run_duration <= 0:
+                fail(f"{path}: Run duration (ms) must be > 0")
+            if window_duration < 0:
+                fail(f"{path}: Window duration (ms) must be >= 0")
+            if window_samples <= 0:
+                fail(f"{path}: Window samples must be > 0")
+            if run_samples < window_samples:
+                fail(f"{path}: Run samples must be >= Window samples for '{test}'")
+            if measured_work <= 0:
+                fail(f"{path}: Measured work (ms) must be > 0")
+            if target_duration <= 0:
+                fail(f"{path}: Target duration (ms) must be > 0")
+            if measured_work + 1e-6 < target_duration:
+                fail(f"{path}: Measured work (ms) must be >= Target duration (ms) for '{test}'")
+            if run_duration + 5.0 < measured_work:
+                fail(f"{path}: Run duration (ms) must not be materially smaller than Measured work (ms) for '{test}'")
+            if case_repeats <= 0:
+                fail(f"{path}: Case repeats must be > 0")
             if trim_ratio < 0 or trim_ratio >= 0.5:
                 fail(f"{path}: Trim ratio must be in [0, 0.5)")
-            if to_float(path, r, "Mean SM in window") <= 0:
+            if mean_sm <= 0:
                 fail(f"{path}: Mean SM in window must be > 0")
-            if to_float(path, r, "Peak SM in window") <= 0:
+            if peak_sm <= 0:
                 fail(f"{path}: Peak SM in window must be > 0")
+            if mean_sm > peak_sm + 1e-6:
+                fail(f"{path}: Mean SM in window cannot exceed Peak SM in window for '{test}'")
+            if sm_threshold <= 0:
+                fail(f"{path}: SM active threshold (MHz) must be > 0")
+            if active_pct < 0 or active_pct > 100:
+                fail(f"{path}: Window samples above SM threshold (%) must be in [0, 100]")
+            if fallback_window and window_samples != run_samples:
+                fail(f"{path}: Fallback window rows must use the full run window for '{test}'")
+            if fallback_window and trim_ratio != 0:
+                fail(f"{path}: Trim ratio must be 0 when Fallback window is true for '{test}'")
+            if fallback_run_window:
+                fail(f"{path}: Fallback run window should be false for the current methodology ('{test}')")
+            expect_close(
+                path,
+                f"Perf delta vs baseline (%) for '{test}'",
+                perf_delta_pct,
+                ((perf_value - baseline_perf) / baseline_perf) * 100.0,
+                rel_tol=1e-6,
+                abs_tol=1e-4,
+            )
 
 
 def main() -> None:
@@ -251,7 +343,7 @@ def main() -> None:
             energy_summary = results_dir / "energy" / "efficiency_active_summary.csv"
 
     if energy_summary is not None:
-        validate_energy(energy_summary)
+        validate_energy(energy_summary, results_dir)
 
     print(f"Validation OK for {results_dir}")
     if energy_summary is not None:

@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +80,7 @@ public:
         long long case_repeats = std::max<long long>(
             1, static_cast<long long>(std::ceil((target_duration_ms / estimate_ms) * 1.10)));
 
+        const auto run_start = std::chrono::system_clock::now();
         double measured_ms = run_case_repeats_ms(case_repeats);
         while (measured_ms + 1e-6 < target_duration_ms) {
             const double batch_ms = std::max(measured_ms / static_cast<double>(case_repeats), 0.001);
@@ -87,11 +89,16 @@ public:
             measured_ms += run_case_repeats_ms(extra_repeats);
             case_repeats += extra_repeats;
         }
+        const auto run_end = std::chrono::system_clock::now();
+        const double wall_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(run_end - run_start).count();
 
         return EnergyRunResult{
             bytes_to_gbs(case_bytes_traffic() * static_cast<double>(case_repeats), measured_ms),
             measured_ms,
+            wall_ms,
             case_repeats,
+            run_start,
+            run_end,
         };
     }
 

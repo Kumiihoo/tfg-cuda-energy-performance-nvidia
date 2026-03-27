@@ -50,6 +50,46 @@ cleanup_current_logger() {
   CURRENT_LOGGER_PID=""
 }
 
+power_log_has_sample() {
+  local log_path="$1"
+
+  if [[ ! -s "$log_path" ]]; then
+    return 1
+  fi
+
+  local last_line=""
+  last_line="$(tail -n 1 "$log_path" 2>/dev/null || true)"
+  [[ "$last_line" == *,*,*,*,*,* ]] || return 1
+  [[ "$last_line" != *"N/A"* ]] || return 1
+  [[ "$last_line" != *"n/a"* ]] || return 1
+  [[ "$last_line" != *"Not Supported"* ]] || return 1
+  [[ "$last_line" != *"not supported"* ]]
+}
+
+wait_for_power_logger_sample() {
+  local log_path="$1"
+  local logger_pid="$2"
+  local label="$3"
+  local max_attempts="${4:-100}"
+  local attempt
+
+  for ((attempt = 0; attempt < max_attempts; attempt++)); do
+    if power_log_has_sample "$log_path"; then
+      return 0
+    fi
+
+    if ! kill -0 "$logger_pid" >/dev/null 2>&1; then
+      echo "Error: power logger exited before producing samples for case '$label'" >&2
+      return 1
+    fi
+
+    sleep 0.1
+  done
+
+  echo "Error: timed out waiting for first power sample for case '$label' at $log_path" >&2
+  return 1
+}
+
 handle_exit_signal() {
   local signal="$1"
 
@@ -142,13 +182,16 @@ run_energy_case() {
   CURRENT_LOGGER_PID=$!
   local logger_pid="$CURRENT_LOGGER_PID"
 
-  # Short preroll so nvidia-smi is already sampling when the benchmark starts.
-  sleep 1.0
+  if ! wait_for_power_logger_sample "$out_csv" "$logger_pid" "$label"; then
+    cleanup_current_logger
+    return 1
+  fi
 
   if ! CUDA_VISIBLE_DEVICES="$gpu" "$bench_bin" \
     "${bench_args[@]}" \
     --energy-duration-ms "$energy_duration_ms" \
     --energy-meta-out "$out_meta" \
+    --energy-case-key "$case_key" \
     --out-dir "$out_root/tmp" >/dev/null; then
     cleanup_current_logger
     echo "Error: long-run energy benchmark failed for case '$label'" >&2
