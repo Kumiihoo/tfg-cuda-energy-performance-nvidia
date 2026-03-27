@@ -18,7 +18,8 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
 ## Project layout
 
 - `src/`
-  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`, `--energy-duration-ms`, `--energy-meta-out`) with auto output routing by GPU type
+  - `main.cu`: CLI entrypoint (`--mode`, `--out-dir`, `--tag`, `--energy-duration-ms`, `--energy-meta-out`) with case-specific flags for BW/Compute/GEMM/FFT
+  - `bench_api.h`: shared benchmark/energy-run interface used by the CUDA benchmark implementations
   - `device_info.cu`: GPU inventory and checks
   - `bw_bench.cu`: BW sweep with VRAM-aware size cap
   - `compute_bench.cu`: compute sweep with SM-aware grid size
@@ -26,6 +27,7 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `fft_bench.cu`: cuFFT 1D batched C2C benchmark
 - `scripts/`
   - `power_logger.sh`: power logging helper
+  - `perf_targets.py`: selects the energy target cases from baseline CSVs
   - `energy_active_summary.py`: benchmark-delimited stable-window efficiency summary
   - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`, `plot_fft.py`: per-benchmark plot generators
   - `plot_compare_envs.py`: A100 vs RTX5000 comparison CSV + plots
@@ -89,6 +91,9 @@ Useful flags:
 # Increase long-run duration for energy measurements
 ./scripts/run_campaign.sh --env rtx5000 --energy-duration-ms 3000
 
+# Tighten or relax the stable-window trim used by the energy summary
+./scripts/run_campaign.sh --env rtx5000 --stable-window-trim 0.10
+
 # Resume post-baseline stages only (energy, summary, plots, validation)
 ./scripts/run_campaign.sh --env rtx5000 --skip-build --skip-baseline
 
@@ -132,7 +137,8 @@ This generates:
 - `results/compare/speedup_a100_vs_rtx5000.png`
 
 The comparison summary reports both `BW peak` and `BW sustained`, and now includes FFT performance when `fft.csv` is available in both environments.
-Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s`.
+FFT currently contributes to the performance comparison only; the efficiency comparison still covers the original energy-tracked cases.
+Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s` or `MSamples/s`.
 `environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
 
 ## Preflight (environment checks only)
@@ -233,5 +239,6 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.
+- FFT is currently integrated as a baseline/control benchmark plus cross-environment performance comparison; it is not yet part of the automated energy summary target set.
 - Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps, then trim the configured fraction from the beginning and end of that run window.
 - SM clock is retained as a diagnostic signal, not as the primary definition of activity.
