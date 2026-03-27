@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 from perf_targets import TEST_ORDER
 
+OPTIONAL_PERFORMANCE_TESTS = {"FFT C2C max"}
 
 REQUIRED_FILES = [
     "summary_compare.csv",
@@ -29,9 +30,8 @@ REQUIRED_COLUMNS = {
 EXPECTED_TESTS = set(TEST_ORDER)
 
 EXPECTED_METRICS = {"performance", "efficiency"}
-EXPECTED_ROW_COUNT = len(EXPECTED_TESTS) * len(EXPECTED_METRICS)
 EXPECTED_UNITS = {
-    "performance": {"GB/s", "GFLOP/s"},
+    "performance": {"GB/s", "GFLOP/s", "MSamples/s"},
     "efficiency": {"GB/s/W", "GFLOP/s/W"},
 }
 ENV_COMPARE_COLUMNS = {
@@ -69,25 +69,32 @@ def check_summary(path: Path) -> None:
     df = pd.read_csv(path)
     if df.empty:
         fail(f"No rows in {path}")
-    if len(df) != EXPECTED_ROW_COUNT:
-        fail(f"{path}: expected {EXPECTED_ROW_COUNT} rows, got {len(df)}")
 
     cols = set(df.columns)
     if cols != REQUIRED_COLUMNS:
         fail(f"{path}: expected columns {sorted(REQUIRED_COLUMNS)}, got {list(df.columns)}")
 
-    tests = set(df["test"].astype(str))
-    if tests != EXPECTED_TESTS:
-        fail(f"{path}: unexpected test set {sorted(tests)}")
-
     metrics = set(df["metric"].astype(str))
     if metrics != EXPECTED_METRICS:
         fail(f"{path}: unexpected metric set {sorted(metrics)}")
 
-    for metric, expected_units in EXPECTED_UNITS.items():
-        units = set(df.loc[df["metric"].astype(str) == metric, "unit"].astype(str))
-        if units != expected_units:
-            fail(f"{path}: unexpected units for metric '{metric}': {sorted(units)}")
+    perf_df = df[df["metric"].astype(str) == "performance"].copy()
+    eff_df = df[df["metric"].astype(str) == "efficiency"].copy()
+
+    perf_tests = set(perf_df["test"].astype(str))
+    eff_tests = set(eff_df["test"].astype(str))
+    allowed_perf_tests = EXPECTED_TESTS.union(OPTIONAL_PERFORMANCE_TESTS)
+    if not EXPECTED_TESTS.issubset(perf_tests) or not perf_tests.issubset(allowed_perf_tests):
+        fail(f"{path}: unexpected performance test set {sorted(perf_tests)}")
+    if eff_tests != EXPECTED_TESTS:
+        fail(f"{path}: unexpected efficiency test set {sorted(eff_tests)}")
+
+    perf_units = set(perf_df["unit"].astype(str))
+    eff_units = set(eff_df["unit"].astype(str))
+    if not perf_units.issubset(EXPECTED_UNITS["performance"]):
+        fail(f"{path}: unexpected performance units {sorted(perf_units)}")
+    if eff_units != EXPECTED_UNITS["efficiency"]:
+        fail(f"{path}: unexpected efficiency units {sorted(eff_units)}")
 
     for col in ["a100", "rtx5000", "ratio_a100_vs_rtx5000"]:
         values = pd.to_numeric(df[col], errors="coerce")

@@ -20,6 +20,7 @@ add_executable(bench
   src/bw_bench.cu
   src/compute_bench.cu
   src/gemm_bench.cu
+  src/fft_bench.cu
 )
 
 target_compile_options(bench PRIVATE
@@ -28,4 +29,4 @@ target_compile_options(bench PRIVATE
 )
 
 find_package(CUDAToolkit REQUIRED)
-target_link_libraries(bench PRIVATE CUDA::cublas)
+target_link_libraries(bench PRIVATE CUDA::cublas CUDA::cufft)

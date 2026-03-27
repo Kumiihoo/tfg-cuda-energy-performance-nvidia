@@ -111,6 +111,37 @@ def validate_gemm(path: Path) -> None:
         fail(f"{path}: expected both tf32=0 and tf32=1")
 
 
+def validate_fft(path: Path) -> None:
+    rows = read_rows(path)
+    required = {"n", "batch", "iters", "time_ms", "transforms_per_s", "MSamples_per_s"}
+    if set(rows[0].keys()) != required:
+        fail(f"{path}: expected columns {sorted(required)}, got {list(rows[0].keys())}")
+
+    prev_n = -1
+    for r in rows:
+        n = to_int(path, r, "n")
+        batch = to_int(path, r, "batch")
+        iters = to_int(path, r, "iters")
+        time_ms = to_float(path, r, "time_ms")
+        transforms = to_float(path, r, "transforms_per_s")
+        msamples = to_float(path, r, "MSamples_per_s")
+        if n <= 0:
+            fail(f"{path}: n must be > 0")
+        if batch <= 0:
+            fail(f"{path}: batch must be > 0")
+        if iters <= 0:
+            fail(f"{path}: iters must be > 0")
+        if time_ms <= 0:
+            fail(f"{path}: time_ms must be > 0")
+        if transforms <= 0:
+            fail(f"{path}: transforms_per_s must be > 0")
+        if msamples <= 0:
+            fail(f"{path}: MSamples_per_s must be > 0")
+        if n <= prev_n:
+            fail(f"{path}: n values must be strictly increasing")
+        prev_n = n
+
+
 def validate_energy(path: Path) -> None:
     rows = read_rows(path)
 
@@ -206,6 +237,9 @@ def main() -> None:
     validate_bw(results_dir / "bw.csv")
     validate_compute(results_dir / "compute.csv")
     validate_gemm(results_dir / "gemm.csv")
+    fft_path = results_dir / "fft.csv"
+    if fft_path.exists():
+        validate_fft(fft_path)
 
     energy_summary = None
     if args.energy_summary:

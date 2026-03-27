@@ -482,6 +482,10 @@ echo "[5/6] Computing efficiency + plots"
   --input "$RESULTS_ROOT/baseline/gemm.csv" \
   --output "$RESULTS_ROOT/baseline/gemm.png"
 
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/plot_fft.py" \
+  --input "$RESULTS_ROOT/baseline/fft.csv" \
+  --output "$RESULTS_ROOT/baseline/fft.png"
+
 echo "[6/6] Validating outputs"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/validate_results.py" \
   --results-dir "$RESULTS_ROOT/baseline" \

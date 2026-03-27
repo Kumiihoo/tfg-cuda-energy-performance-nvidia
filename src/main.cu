@@ -1,5 +1,6 @@
 #include "bench_api.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,7 +16,7 @@
 #include <cuda_runtime.h>
 
 static bool valid_mode(const std::string& mode) {
-    return mode == "all" || mode == "bw" || mode == "compute" || mode == "gemm";
+    return mode == "all" || mode == "bw" || mode == "compute" || mode == "gemm" || mode == "fft";
 }
 
 static bool valid_compute_dtype(const std::string& dtype) {
@@ -169,6 +170,23 @@ static void write_gemm_result_csv(const std::string& path, int n, int iters, boo
     std::fclose(f);
 }
 
+static void write_fft_result_csv(const std::string& path,
+                                 int n,
+                                 int batch,
+                                 int iters,
+                                 double time_ms,
+                                 double transforms_per_s,
+                                 double msamples_per_s) {
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+    std::fprintf(f, "n,batch,iters,time_ms,transforms_per_s,MSamples_per_s\n");
+    std::fprintf(f, "%d,%d,%d,%.4f,%.2f,%.2f\n", n, batch, iters, time_ms, transforms_per_s, msamples_per_s);
+    std::fclose(f);
+}
+
 static void write_energy_meta_csv(const std::string& path,
                                   const std::string& case_key,
                                   const std::string& params,
@@ -204,7 +222,7 @@ static void write_energy_meta_csv(const std::string& path,
 
 static void usage(const char* prog) {
     std::printf(
-        "Usage: %s [--mode all|bw|compute|gemm] [--out-dir PATH] [--tag NAME] [advanced case flags]\n"
+        "Usage: %s [--mode all|bw|compute|gemm|fft] [--out-dir PATH] [--tag NAME] [advanced case flags]\n"
         "Default out-dir: auto -> results/<a100|rtx5000|other_gpu>/baseline\n"
         "Energy mode:\n"
         "  --energy-duration-ms N   Target duration for in-process long-run measurement (case mode only)\n"
@@ -213,13 +231,15 @@ static void usage(const char* prog) {
         "  BW:      --bw-bytes N --bw-iters N --bw-block N\n"
         "  Compute: --compute-dtype fp32|fp64 --compute-block N --compute-grid N --compute-iters N\n"
         "  GEMM:    --gemm-n N --gemm-iters N --gemm-tf32 0|1\n"
+        "  FFT:     --fft-n N --fft-batch N --fft-iters N\n"
         "Examples:\n"
         "  %s --mode all\n"
         "  %s --mode gemm --out-dir results/a100/baseline\n"
         "  %s --mode compute --compute-dtype fp32 --compute-block 1024 --compute-grid 864 --compute-iters 4096\n"
+        "  %s --mode fft --fft-n 1048576 --fft-batch 16 --fft-iters 10\n"
         "  %s --mode bw --bw-bytes 1048576 --bw-iters 200 --bw-block 256 --energy-duration-ms 2000 \\\n"
         "     --energy-meta-out results/a100/energy/power_bw_peak_long_meta.csv\n",
-        prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv) {
@@ -248,9 +268,15 @@ int main(int argc, char** argv) {
     int gemm_n = 0;
     int gemm_iters = 0;
     int gemm_tf32 = -1;
+    int fft_n = 0;
+    int fft_batch = 0;
+    int fft_iters = 0;
     bool gemm_n_given = false;
     bool gemm_iters_given = false;
     bool gemm_tf32_given = false;
+    bool fft_n_given = false;
+    bool fft_batch_given = false;
+    bool fft_iters_given = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -327,6 +353,24 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Invalid value for --gemm-tf32\n");
                 return 1;
             }
+        } else if (arg == "--fft-n" && i + 1 < argc) {
+            fft_n_given = parse_int_arg(argv[++i], &fft_n);
+            if (!fft_n_given) {
+                std::fprintf(stderr, "Invalid value for --fft-n\n");
+                return 1;
+            }
+        } else if (arg == "--fft-batch" && i + 1 < argc) {
+            fft_batch_given = parse_int_arg(argv[++i], &fft_batch);
+            if (!fft_batch_given) {
+                std::fprintf(stderr, "Invalid value for --fft-batch\n");
+                return 1;
+            }
+        } else if (arg == "--fft-iters" && i + 1 < argc) {
+            fft_iters_given = parse_int_arg(argv[++i], &fft_iters);
+            if (!fft_iters_given) {
+                std::fprintf(stderr, "Invalid value for --fft-iters\n");
+                return 1;
+            }
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
             return 0;
@@ -389,6 +433,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    const bool fft_case = fft_n_given || fft_batch_given || fft_iters_given;
+    if (fft_case) {
+        if (mode != "fft") {
+            std::fprintf(stderr, "FFT case flags require --mode fft\n");
+            return 1;
+        }
+        if (!(fft_n_given && fft_batch_given && fft_iters_given)) {
+            std::fprintf(stderr, "FFT case requires --fft-n, --fft-batch and --fft-iters together\n");
+            return 1;
+        }
+        if (fft_n <= 0 || fft_batch <= 0 || fft_iters <= 0) {
+            std::fprintf(stderr, "FFT case values must be > 0\n");
+            return 1;
+        }
+    }
+
     if (energy_mode) {
         if (!(energy_duration_given && energy_meta_out_given)) {
             std::fprintf(stderr, "Energy mode requires both --energy-duration-ms and --energy-meta-out\n");
@@ -398,7 +458,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Energy mode is only supported for case-specific bw/compute/gemm executions\n");
             return 1;
         }
-        if ((mode == "bw" && !bw_case) || (mode == "compute" && !compute_case) || (mode == "gemm" && !gemm_case)) {
+        if ((mode == "bw" && !bw_case) || (mode == "compute" && !compute_case) ||
+            (mode == "gemm" && !gemm_case) || (mode == "fft" && !fft_case)) {
             std::fprintf(stderr, "Energy mode requires a fully specified benchmark case\n");
             return 1;
         }
@@ -432,6 +493,7 @@ int main(int argc, char** argv) {
     const std::string bw_path = join_path(base_out, "bw.csv");
     const std::string compute_path = join_path(base_out, "compute.csv");
     const std::string gemm_path = join_path(base_out, "gemm.csv");
+    const std::string fft_path = join_path(base_out, "fft.csv");
 
     if (energy_mode) {
         std::string case_key;
@@ -472,6 +534,19 @@ int main(int argc, char** argv) {
             write_gemm_result_csv(gemm_path, gemm_n, gemm_iters, gemm_tf32 == 1, result.avg_perf);
             std::printf("GEMM long-run avg -> %.2f GFLOP/s\n", result.avg_perf);
             std::printf("Wrote %s\n", gemm_path.c_str());
+        } else if (mode == "fft") {
+            case_key = "fft";
+            params = "--fft-n " + std::to_string(fft_n) +
+                     " --fft-batch " + std::to_string(fft_batch) +
+                     " --fft-iters " + std::to_string(fft_iters);
+            perf_unit = "MSamples/s";
+            result = run_fft_case_for_energy(fft_n, fft_batch, fft_iters, static_cast<double>(energy_duration_ms));
+            const double exec_calls = static_cast<double>(fft_iters) * static_cast<double>(result.case_repeats);
+            const double time_ms = result.measured_work_ms / std::max(exec_calls, 1.0);
+            const double transforms_per_s = (result.avg_perf * 1e6) / static_cast<double>(fft_n);
+            write_fft_result_csv(fft_path, fft_n, fft_batch, fft_iters, time_ms, transforms_per_s, result.avg_perf);
+            std::printf("FFT long-run avg -> %.2f MSamples/s\n", result.avg_perf);
+            std::printf("Wrote %s\n", fft_path.c_str());
         }
         const auto run_end = std::chrono::system_clock::now();
 
@@ -514,6 +589,14 @@ int main(int argc, char** argv) {
             run_gemm_sweep_to_csv(gemm_path.c_str());
         }
         std::printf("Wrote %s\n", gemm_path.c_str());
+    }
+    if (mode == "fft" || mode == "all") {
+        if (fft_case) {
+            run_fft_case_to_csv(fft_path.c_str(), fft_n, fft_batch, fft_iters);
+        } else {
+            run_fft_sweep_to_csv(fft_path.c_str());
+        }
+        std::printf("Wrote %s\n", fft_path.c_str());
     }
 
     return 0;

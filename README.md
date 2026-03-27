@@ -8,6 +8,7 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `bw`: global memory copy bandwidth
   - `compute`: FP32/FP64 FMA throughput
   - `gemm`: cuBLAS SGEMM with TF32 on/off
+  - `fft`: cuFFT 1D batched C2C control workload
 - Power telemetry via `nvidia-smi`
 - Plot generation scripts (per-GPU and cross-GPU)
 - Stable-window efficiency summary with per-target power logs and benchmark-delimited metadata
@@ -22,10 +23,11 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `bw_bench.cu`: BW sweep with VRAM-aware size cap
   - `compute_bench.cu`: compute sweep with SM-aware grid size
   - `gemm_bench.cu`: cuBLAS SGEMM benchmark with in-process long-run energy mode
+  - `fft_bench.cu`: cuFFT 1D batched C2C benchmark
 - `scripts/`
   - `power_logger.sh`: power logging helper
   - `energy_active_summary.py`: benchmark-delimited stable-window efficiency summary
-  - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`: per-benchmark plot generators
+  - `plot_bw.py`, `plot_compute.py`, `plot_gemm.py`, `plot_fft.py`: per-benchmark plot generators
   - `plot_compare_envs.py`: A100 vs RTX5000 comparison CSV + plots
   - `validate_results.py`: single-environment CSV sanity validator
   - `validate_compare.py`: cross-environment artifact validator
@@ -129,7 +131,7 @@ This generates:
 - `results/compare/efficiency_compare.png`
 - `results/compare/speedup_a100_vs_rtx5000.png`
 
-The comparison summary reports both `BW peak` and `BW sustained`.
+The comparison summary reports both `BW peak` and `BW sustained`, and now includes FFT performance when `fft.csv` is available in both environments.
 Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s`.
 `environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
 
@@ -230,5 +232,6 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
+- FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.
 - Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps, then trim the configured fraction from the beginning and end of that run window.
 - SM clock is retained as a diagnostic signal, not as the primary definition of activity.

@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from perf_targets import TEST_LABEL, TEST_ORDER, load_perf_targets
 
+PERF_TEST_ORDER = TEST_ORDER + ["FFT C2C max"]
+EXTRA_TEST_LABEL = {"FFT C2C max": "FFT C2C"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare A100 vs RTX5000 benchmark and efficiency results")
@@ -181,6 +184,16 @@ def load_performance(env_root: Path) -> dict[str, tuple[str, float]]:
     perf: dict[str, tuple[str, float]] = {}
     for target in load_perf_targets(env_root / "baseline"):
         perf[target.test] = (target.perf_unit, target.perf)
+
+    fft_path = env_root / "baseline" / "fft.csv"
+    if fft_path.exists():
+        fft = read_csv(fft_path)
+        require_columns(fft_path, fft, {"n", "batch", "iters", "MSamples_per_s"})
+        fft["MSamples_per_s"] = pd.to_numeric(fft["MSamples_per_s"], errors="coerce")
+        fft = fft.dropna(subset=["MSamples_per_s"]).copy()
+        if not fft.empty:
+            row = fft.loc[fft["MSamples_per_s"].idxmax()]
+            perf["FFT C2C max"] = ("MSamples/s", as_float(row["MSamples_per_s"], f"{fft_path}:FFT C2C max"))
     return perf
 
 
@@ -212,9 +225,13 @@ def env_frame(env_name: str, env_root: Path) -> pd.DataFrame:
     eff = load_efficiency(env_root)
 
     rows: list[dict[str, object]] = []
-    for test in TEST_ORDER:
+    for test in PERF_TEST_ORDER:
+        if test not in perf:
+            continue
         p_unit, p_val = perf[test]
         rows.append({"test": test, "metric": "performance", "unit": p_unit, "value": p_val, "env": env_name})
+    for test in TEST_ORDER:
+        p_unit, _ = perf[test]
         rows.append({"test": test, "metric": "efficiency", "unit": f"{p_unit}/W", "value": eff[test], "env": env_name})
     return pd.DataFrame(rows)
 
@@ -230,7 +247,7 @@ def build_compare_table(a100: pd.DataFrame, rtx: pd.DataFrame) -> pd.DataFrame:
     merged["ratio_a100_vs_rtx5000"] = merged["a100"] / merged["rtx5000"]
     merged["delta_percent"] = (merged["ratio_a100_vs_rtx5000"] - 1.0) * 100.0
 
-    merged["test"] = pd.Categorical(merged["test"], TEST_ORDER, ordered=True)
+    merged["test"] = pd.Categorical(merged["test"], PERF_TEST_ORDER, ordered=True)
     metric_order = pd.CategoricalDtype(["performance", "efficiency"], ordered=True)
     merged["metric"] = merged["metric"].astype(metric_order)
     merged = merged.sort_values(["metric", "test"]).reset_index(drop=True)
@@ -249,7 +266,7 @@ def plot_grouped(compare_df: pd.DataFrame, metric: str, out_path: Path) -> None:
 
     for ax, unit in zip(axes.flat, units):
         sub = df[df["unit"].astype(str) == unit].copy()
-        labels = [TEST_LABEL.get(t, t) for t in sub["test"].tolist()]
+        labels = [EXTRA_TEST_LABEL.get(t, TEST_LABEL.get(t, t)) for t in sub["test"].tolist()]
         x = list(range(len(labels)))
         w = 0.38
 
@@ -277,7 +294,7 @@ def plot_grouped(compare_df: pd.DataFrame, metric: str, out_path: Path) -> None:
 
 def plot_ratio(compare_df: pd.DataFrame, out_path: Path) -> None:
     df = compare_df.copy()
-    labels = [f"{TEST_LABEL.get(t, t)}\n({'perf' if m == 'performance' else 'eff'})" for t, m in zip(df["test"], df["metric"])]
+    labels = [f"{EXTRA_TEST_LABEL.get(t, TEST_LABEL.get(t, t))}\n({'perf' if m == 'performance' else 'eff'})" for t, m in zip(df["test"], df["metric"])]
     colors = ["tab:blue" if m == "performance" else "tab:green" for m in df["metric"]]
 
     plt.figure(figsize=(12, 5.4))
