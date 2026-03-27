@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 
@@ -108,6 +109,22 @@ static double run_fp64_gflops(int grid, int block, int iters) {
     return (flops / sec) / 1e9;
 }
 
+static void write_compute_row(FILE* f, const char* dtype, int block, int grid, int iters) {
+    double gflops = 0.0;
+    if (std::strcmp(dtype, "fp32") == 0) {
+        gflops = run_fp32_gflops(grid, block, iters);
+    } else if (std::strcmp(dtype, "fp64") == 0) {
+        gflops = run_fp64_gflops(grid, block, iters);
+    } else {
+        std::fprintf(stderr, "Unsupported compute dtype '%s'\n", dtype);
+        std::exit(1);
+    }
+
+    std::fprintf(f, "%s,%d,%d,%d,%.2f\n", dtype, block, grid, iters, gflops);
+    std::fflush(f);
+    std::printf("%s block=%d grid=%d -> %.2f GFLOP/s\n", dtype, block, grid, gflops);
+}
+
 void run_compute_sweep_to_csv(const char* path) {
     FILE* f = std::fopen(path, "w");
     if (!f) {
@@ -127,17 +144,21 @@ void run_compute_sweep_to_csv(const char* path) {
 
     for (int block : blocks) {
         int grid = base_grid;
-
-        double g32 = run_fp32_gflops(grid, block, iters);
-        std::fprintf(f, "fp32,%d,%d,%d,%.2f\n", block, grid, iters, g32);
-        std::fflush(f);
-        std::printf("FP32 block=%d -> %.2f GFLOP/s\n", block, g32);
-
-        double g64 = run_fp64_gflops(grid, block, iters);
-        std::fprintf(f, "fp64,%d,%d,%d,%.2f\n", block, grid, iters, g64);
-        std::fflush(f);
-        std::printf("FP64 block=%d -> %.2f GFLOP/s\n", block, g64);
+        write_compute_row(f, "fp32", block, grid, iters);
+        write_compute_row(f, "fp64", block, grid, iters);
     }
 
+    std::fclose(f);
+}
+
+void run_compute_case_to_csv(const char* path, const char* dtype, int block, int grid, int iters) {
+    FILE* f = std::fopen(path, "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+
+    std::fprintf(f, "dtype,block,grid,iters,GFLOPs\n");
+    write_compute_row(f, dtype, block, grid, iters);
     std::fclose(f);
 }

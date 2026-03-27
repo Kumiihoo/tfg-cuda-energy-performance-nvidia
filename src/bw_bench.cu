@@ -80,6 +80,19 @@ double run_bw_bytes_per_s(size_t bytes, int iters, int block) {
     return total_bytes / seconds;
 }
 
+static void write_bw_row(FILE* f, size_t bytes, int iters, int block) {
+    double bps = run_bw_bytes_per_s(bytes, iters, block);
+    if (bps <= 0.0) {
+        std::fprintf(stderr, "BW bytes=%zu failed or was skipped\n", bytes);
+        std::exit(1);
+    }
+
+    double gbs = bps / 1e9;
+    std::fprintf(f, "%zu,%d,%d,%.3f\n", bytes, iters, block, gbs);
+    std::fflush(f);
+    std::printf("BW bytes=%zu -> %.3f GB/s\n", bytes, gbs);
+}
+
 void run_bw_sweep_to_csv(const char* path) {
     FILE* f = std::fopen(path, "w");
     if (!f) {
@@ -122,17 +135,20 @@ void run_bw_sweep_to_csv(const char* path) {
                 max_test_bytes, (double)max_test_bytes / (1024.0 * 1024.0 * 1024.0));
 
     for (size_t bytes : sizes) {
-        double bps = run_bw_bytes_per_s(bytes, iters, block);
-        if (bps <= 0.0) {
-            std::printf("BW bytes=%zu skipped\n", bytes);
-            continue;
-        }
-
-        double gbs = bps / 1e9;
-        std::fprintf(f, "%zu,%d,%d,%.3f\n", bytes, iters, block, gbs);
-        std::fflush(f);
-        std::printf("BW bytes=%zu -> %.3f GB/s\n", bytes, gbs);
+        write_bw_row(f, bytes, iters, block);
     }
 
+    std::fclose(f);
+}
+
+void run_bw_case_to_csv(const char* path, size_t bytes, int iters, int block) {
+    FILE* f = std::fopen(path, "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+
+    std::fprintf(f, "bytes,iters,block,GBs\n");
+    write_bw_row(f, bytes, iters, block);
     std::fclose(f);
 }

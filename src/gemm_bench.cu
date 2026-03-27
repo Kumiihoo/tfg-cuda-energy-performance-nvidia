@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 
+__global__ void fill_kernel(float* data, size_t n, float value) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) data[idx] = value;
+}
+
 static void checkCuda(cudaError_t e, const char* msg) {
     if (e != cudaSuccess) {
         fprintf(stderr, "CUDA error %s: %s\n", msg, cudaGetErrorString(e));
@@ -31,13 +36,18 @@ double run_gemm_fp32(int N, int iters, bool tf32) {
                 "cublasSetMathMode");
 
     size_t bytes = (size_t)N * (size_t)N * sizeof(float);
+    size_t elems = (size_t)N * (size_t)N;
     float *A=nullptr, *B=nullptr, *C=nullptr;
     checkCuda(cudaMalloc(&A, bytes), "malloc A");
     checkCuda(cudaMalloc(&B, bytes), "malloc B");
     checkCuda(cudaMalloc(&C, bytes), "malloc C");
-    checkCuda(cudaMemset(A, 1, bytes), "memset A");
-    checkCuda(cudaMemset(B, 1, bytes), "memset B");
+    int block = 256;
+    int grid = (int)((elems + (size_t)block - 1) / (size_t)block);
+    fill_kernel<<<grid, block>>>(A, elems, 1.0f);
+    fill_kernel<<<grid, block>>>(B, elems, 1.0f);
+    checkCuda(cudaGetLastError(), "fill kernel");
     checkCuda(cudaMemset(C, 0, bytes), "memset C");
+    checkCuda(cudaDeviceSynchronize(), "sync fill");
 
     const float alpha = 1.0f, beta = 0.0f;
 
@@ -84,6 +94,13 @@ double run_gemm_fp32(int N, int iters, bool tf32) {
     return gflops_gemm(N, sec);
 }
 
+static void write_gemm_row(FILE* f, int N, int iters, bool tf32) {
+    double gflops = run_gemm_fp32(N, iters, tf32);
+    std::fprintf(f, "%d,%d,%d,%.2f\n", N, iters, tf32 ? 1 : 0, gflops);
+    std::fflush(f);
+    std::printf("GEMM FP32 N=%d TF32=%d -> %.2f GFLOP/s\n", N, tf32 ? 1 : 0, gflops);
+}
+
 void run_gemm_sweep_to_csv(const char* path) {
     FILE* f = std::fopen(path, "w");
     if (!f) { perror("fopen"); std::exit(1); }
@@ -94,16 +111,21 @@ void run_gemm_sweep_to_csv(const char* path) {
     const int iters = 20;
 
     for (int N : sizes) {
-        double g_def = run_gemm_fp32(N, iters, false);
-        std::fprintf(f, "%d,%d,%d,%.2f\n", N, iters, 0, g_def);
-        std::fflush(f);
-        std::printf("GEMM FP32 N=%d TF32=0 -> %.2f GFLOP/s\n", N, g_def);
-
-        double g_tf = run_gemm_fp32(N, iters, true);
-        std::fprintf(f, "%d,%d,%d,%.2f\n", N, iters, 1, g_tf);
-        std::fflush(f);
-        std::printf("GEMM FP32 N=%d TF32=1 -> %.2f GFLOP/s\n", N, g_tf);
+        write_gemm_row(f, N, iters, false);
+        write_gemm_row(f, N, iters, true);
     }
 
+    std::fclose(f);
+}
+
+void run_gemm_case_to_csv(const char* path, int N, int iters, bool tf32) {
+    FILE* f = std::fopen(path, "w");
+    if (!f) {
+        perror("fopen");
+        std::exit(1);
+    }
+
+    std::fprintf(f, "N,iters,tf32,GFLOPs\n");
+    write_gemm_row(f, N, iters, tf32);
     std::fclose(f);
 }

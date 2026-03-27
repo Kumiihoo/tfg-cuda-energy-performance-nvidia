@@ -108,13 +108,15 @@ find_nvcc() {
 }
 
 run_power_loop() {
-  local mode="$1"
+  local label="$1"
   local repeats="$2"
   local out_csv="$3"
   local bench_bin="$4"
   local out_root="$5"
   local gpu="$6"
   local sample_ms="$7"
+  shift 7
+  local bench_args=("$@")
 
   mkdir -p "$(dirname "$out_csv")"
   : > "$out_csv"
@@ -131,7 +133,7 @@ run_power_loop() {
     sleep 1.0
 
     for ((i = 1; i <= local_repeats; i++)); do
-      CUDA_VISIBLE_DEVICES="$gpu" "$bench_bin" --mode "$mode" --out-dir "$out_root/tmp" >/dev/null
+      CUDA_VISIBLE_DEVICES="$gpu" "$bench_bin" "${bench_args[@]}" --out-dir "$out_root/tmp" >/dev/null
     done
 
     # Give logger a short grace period to flush first samples.
@@ -142,7 +144,7 @@ run_power_loop() {
     done
 
     if ! kill -0 "$lp" >/dev/null 2>&1; then
-      echo "Warning: power logger exited early for mode '$mode' (attempt ${attempt})" >&2
+      echo "Warning: power logger exited early for case '$label' (attempt ${attempt})" >&2
     fi
 
     cleanup_current_logger
@@ -151,12 +153,22 @@ run_power_loop() {
       return 0
     fi
 
-    echo "Warning: empty power log for mode '$mode' (attempt ${attempt}); retrying with more repeats..." >&2
+    echo "Warning: empty power log for case '$label' (attempt ${attempt}); retrying with more repeats..." >&2
     local_repeats=$((local_repeats * 2))
   done
 
-  echo "Error: failed to capture power log for mode '$mode' at $out_csv" >&2
+  echo "Error: failed to capture power log for case '$label' at $out_csv" >&2
   return 1
+}
+
+load_case_args() {
+  local perf_dir="$1"
+  local case_key="$2"
+
+  "$PYTHON_BIN" "$PROJECT_ROOT/scripts/perf_targets.py" \
+    --perf-dir "$perf_dir" \
+    --case "$case_key" \
+    --field args
 }
 
 run_nsys_profile() {
@@ -200,6 +212,8 @@ write_run_config() {
   local gpu_name=""
   local driver_version=""
   local cuda_driver_version=""
+  local nvcc_version=""
+  local python_version=""
   local cmd="./scripts/run_campaign.sh"
 
   if command -v git >/dev/null 2>&1; then
@@ -209,6 +223,8 @@ write_run_config() {
   gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n "$((GPU + 1))p" | xargs || true)"
   driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
   cuda_driver_version="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n1 | xargs || true)"
+  nvcc_version="$("$NVCC_BIN" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\),.*/\1/p' | head -n1 | xargs || true)"
+  python_version="$("$PYTHON_BIN" --version 2>&1 | xargs || true)"
 
   local arg
   for arg in "${ORIGINAL_ARGS[@]}"; do
@@ -227,12 +243,17 @@ gpu_index=$GPU
 gpu_name=${gpu_name:-unknown}
 driver_version=${driver_version:-unknown}
 cuda_driver_version=${cuda_driver_version:-unknown}
+nvcc_version=${nvcc_version:-unknown}
 nvcc_bin=$NVCC_BIN
 python_bin=$PYTHON_BIN
+python_version=${python_version:-unknown}
 sample_ms=$SAMPLE_MS
 gemm_repeats=$GEMM_REPEATS
 compute_repeats=$COMPUTE_REPEATS
 bw_repeats=$BW_REPEATS
+power_telemetry_source=nvidia-smi
+power_scope=gpu_board
+node_power_not_measured=1
 skip_build=$SKIP_BUILD
 skip_baseline=$SKIP_BASELINE
 install_python_deps=$INSTALL_PY_DEPS
@@ -381,6 +402,7 @@ fi
 
 nvidia-smi > "$RESULTS_ROOT/env/env_nvidia_smi.txt"
 "$NVCC_BIN" --version > "$RESULTS_ROOT/env/env_nvcc.txt"
+"$PYTHON_BIN" --version > "$RESULTS_ROOT/env/env_python.txt" 2>&1
 g++ --version > "$RESULTS_ROOT/env/env_gpp.txt"
 cmake --version > "$RESULTS_ROOT/env/env_cmake.txt"
 
@@ -428,14 +450,30 @@ else
   echo "[1/6] Skipping baseline benchmarks (--skip-baseline)"
 fi
 
-echo "[2/6] Logging GEMM power"
-run_power_loop gemm "$GEMM_REPEATS" "$RESULTS_ROOT/energy/power_gemm_long.csv" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS"
+read -r -a BW_PEAK_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" bw_peak)"
+read -r -a BW_SUSTAINED_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" bw_sustained)"
+read -r -a COMPUTE_FP32_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" compute_fp32_peak)"
+read -r -a COMPUTE_FP64_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" compute_fp64_peak)"
+read -r -a GEMM_TF32_0_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" gemm_tf32_0_max)"
+read -r -a GEMM_TF32_1_ARGS <<< "$(load_case_args "$RESULTS_ROOT/baseline" gemm_tf32_1_max)"
 
-echo "[3/6] Logging compute power"
-run_power_loop compute "$COMPUTE_REPEATS" "$RESULTS_ROOT/energy/power_compute_long.csv" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS"
+echo "[2/6] Logging bandwidth power cases"
+run_power_loop "BW peak" "$BW_REPEATS" "$RESULTS_ROOT/energy/power_bw_peak_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${BW_PEAK_ARGS[@]}"
+run_power_loop "BW sustained" "$BW_REPEATS" "$RESULTS_ROOT/energy/power_bw_sustained_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${BW_SUSTAINED_ARGS[@]}"
 
-echo "[4/6] Logging bandwidth power"
-run_power_loop bw "$BW_REPEATS" "$RESULTS_ROOT/energy/power_bw_long.csv" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS"
+echo "[3/6] Logging compute power cases"
+run_power_loop "Compute FP32 peak" "$COMPUTE_REPEATS" "$RESULTS_ROOT/energy/power_compute_fp32_peak_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${COMPUTE_FP32_ARGS[@]}"
+run_power_loop "Compute FP64 peak" "$COMPUTE_REPEATS" "$RESULTS_ROOT/energy/power_compute_fp64_peak_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${COMPUTE_FP64_ARGS[@]}"
+
+echo "[4/6] Logging GEMM power cases"
+run_power_loop "GEMM TF32=0 max" "$GEMM_REPEATS" "$RESULTS_ROOT/energy/power_gemm_tf32_0_max_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${GEMM_TF32_0_ARGS[@]}"
+run_power_loop "GEMM TF32=1 max" "$GEMM_REPEATS" "$RESULTS_ROOT/energy/power_gemm_tf32_1_max_long.csv" \
+  "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "${GEMM_TF32_1_ARGS[@]}"
 
 echo "[5/6] Computing efficiency + plots"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/energy_active_summary.py" \
@@ -476,8 +514,6 @@ echo "Results at: $RESULTS_ROOT"
 if [[ "$DO_PROFILE" != "1" ]]; then
   echo "Note: no Nsight trace generated. Re-run with --profile or --profile-only."
 fi
-
-
 
 
 

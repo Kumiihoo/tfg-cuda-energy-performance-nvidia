@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -12,11 +13,43 @@
 void print_device_info();
 
 void run_bw_sweep_to_csv(const char* path);
+void run_bw_case_to_csv(const char* path, size_t bytes, int iters, int block);
 void run_compute_sweep_to_csv(const char* path);
+void run_compute_case_to_csv(const char* path, const char* dtype, int block, int grid, int iters);
 void run_gemm_sweep_to_csv(const char* path);
+void run_gemm_case_to_csv(const char* path, int N, int iters, bool tf32);
 
 static bool valid_mode(const std::string& mode) {
     return mode == "all" || mode == "bw" || mode == "compute" || mode == "gemm";
+}
+
+static bool valid_compute_dtype(const std::string& dtype) {
+    return dtype == "fp32" || dtype == "fp64";
+}
+
+static bool parse_int_arg(const std::string& value, int* out) {
+    try {
+        size_t pos = 0;
+        long long parsed = std::stoll(value, &pos, 10);
+        if (pos != value.size()) return false;
+        if (parsed < 0 || parsed > std::numeric_limits<int>::max()) return false;
+        *out = static_cast<int>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool parse_size_arg(const std::string& value, size_t* out) {
+    try {
+        size_t pos = 0;
+        unsigned long long parsed = std::stoull(value, &pos, 10);
+        if (pos != value.size()) return false;
+        *out = static_cast<size_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 static std::string join_path(const std::string& dir, const std::string& file) {
@@ -76,12 +109,17 @@ static std::string detect_env_folder() {
 
 static void usage(const char* prog) {
     std::printf(
-        "Usage: %s [--mode all|bw|compute|gemm] [--out-dir PATH] [--tag NAME]\n"
+        "Usage: %s [--mode all|bw|compute|gemm] [--out-dir PATH] [--tag NAME] [advanced case flags]\n"
         "Default out-dir: auto -> results/<a100|rtx5000|other_gpu>/baseline\n"
+        "Advanced case flags:\n"
+        "  BW:      --bw-bytes N --bw-iters N --bw-block N\n"
+        "  Compute: --compute-dtype fp32|fp64 --compute-block N --compute-grid N --compute-iters N\n"
+        "  GEMM:    --gemm-n N --gemm-iters N --gemm-tf32 0|1\n"
         "Examples:\n"
         "  %s --mode all\n"
-        "  %s --mode gemm --out-dir results/a100/baseline\n",
-        prog, prog, prog);
+        "  %s --mode gemm --out-dir results/a100/baseline\n"
+        "  %s --mode compute --compute-dtype fp32 --compute-block 1024 --compute-grid 864 --compute-iters 4096\n",
+        prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv) {
@@ -89,6 +127,26 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string tag;
     bool out_dir_given = false;
+    size_t bw_bytes = 0;
+    int bw_iters = 0;
+    int bw_block = 0;
+    bool bw_bytes_given = false;
+    bool bw_iters_given = false;
+    bool bw_block_given = false;
+    std::string compute_dtype;
+    int compute_block = 0;
+    int compute_grid = 0;
+    int compute_iters = 0;
+    bool compute_dtype_given = false;
+    bool compute_block_given = false;
+    bool compute_grid_given = false;
+    bool compute_iters_given = false;
+    int gemm_n = 0;
+    int gemm_iters = 0;
+    int gemm_tf32 = -1;
+    bool gemm_n_given = false;
+    bool gemm_iters_given = false;
+    bool gemm_tf32_given = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -99,6 +157,63 @@ int main(int argc, char** argv) {
             out_dir_given = true;
         } else if (arg == "--tag" && i + 1 < argc) {
             tag = argv[++i];
+        } else if (arg == "--bw-bytes" && i + 1 < argc) {
+            bw_bytes_given = parse_size_arg(argv[++i], &bw_bytes);
+            if (!bw_bytes_given) {
+                std::fprintf(stderr, "Invalid value for --bw-bytes\n");
+                return 1;
+            }
+        } else if (arg == "--bw-iters" && i + 1 < argc) {
+            bw_iters_given = parse_int_arg(argv[++i], &bw_iters);
+            if (!bw_iters_given) {
+                std::fprintf(stderr, "Invalid value for --bw-iters\n");
+                return 1;
+            }
+        } else if (arg == "--bw-block" && i + 1 < argc) {
+            bw_block_given = parse_int_arg(argv[++i], &bw_block);
+            if (!bw_block_given) {
+                std::fprintf(stderr, "Invalid value for --bw-block\n");
+                return 1;
+            }
+        } else if (arg == "--compute-dtype" && i + 1 < argc) {
+            compute_dtype = argv[++i];
+            compute_dtype_given = true;
+        } else if (arg == "--compute-block" && i + 1 < argc) {
+            compute_block_given = parse_int_arg(argv[++i], &compute_block);
+            if (!compute_block_given) {
+                std::fprintf(stderr, "Invalid value for --compute-block\n");
+                return 1;
+            }
+        } else if (arg == "--compute-grid" && i + 1 < argc) {
+            compute_grid_given = parse_int_arg(argv[++i], &compute_grid);
+            if (!compute_grid_given) {
+                std::fprintf(stderr, "Invalid value for --compute-grid\n");
+                return 1;
+            }
+        } else if (arg == "--compute-iters" && i + 1 < argc) {
+            compute_iters_given = parse_int_arg(argv[++i], &compute_iters);
+            if (!compute_iters_given) {
+                std::fprintf(stderr, "Invalid value for --compute-iters\n");
+                return 1;
+            }
+        } else if (arg == "--gemm-n" && i + 1 < argc) {
+            gemm_n_given = parse_int_arg(argv[++i], &gemm_n);
+            if (!gemm_n_given) {
+                std::fprintf(stderr, "Invalid value for --gemm-n\n");
+                return 1;
+            }
+        } else if (arg == "--gemm-iters" && i + 1 < argc) {
+            gemm_iters_given = parse_int_arg(argv[++i], &gemm_iters);
+            if (!gemm_iters_given) {
+                std::fprintf(stderr, "Invalid value for --gemm-iters\n");
+                return 1;
+            }
+        } else if (arg == "--gemm-tf32" && i + 1 < argc) {
+            gemm_tf32_given = parse_int_arg(argv[++i], &gemm_tf32);
+            if (!gemm_tf32_given) {
+                std::fprintf(stderr, "Invalid value for --gemm-tf32\n");
+                return 1;
+            }
         } else if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
             return 0;
@@ -112,6 +227,51 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "Invalid mode '%s'\n", mode.c_str());
         usage(argv[0]);
         return 1;
+    }
+
+    const bool bw_case = bw_bytes_given || bw_iters_given || bw_block_given;
+    if (bw_case) {
+        if (mode != "bw") {
+            std::fprintf(stderr, "BW case flags require --mode bw\n");
+            return 1;
+        }
+        if (!(bw_bytes_given && bw_iters_given && bw_block_given)) {
+            std::fprintf(stderr, "BW case requires --bw-bytes, --bw-iters and --bw-block together\n");
+            return 1;
+        }
+    }
+
+    const bool compute_case = compute_dtype_given || compute_block_given || compute_grid_given || compute_iters_given;
+    if (compute_case) {
+        if (mode != "compute") {
+            std::fprintf(stderr, "Compute case flags require --mode compute\n");
+            return 1;
+        }
+        if (!(compute_dtype_given && compute_block_given && compute_grid_given && compute_iters_given)) {
+            std::fprintf(stderr,
+                         "Compute case requires --compute-dtype, --compute-block, --compute-grid and --compute-iters together\n");
+            return 1;
+        }
+        if (!valid_compute_dtype(compute_dtype)) {
+            std::fprintf(stderr, "Invalid compute dtype '%s'\n", compute_dtype.c_str());
+            return 1;
+        }
+    }
+
+    const bool gemm_case = gemm_n_given || gemm_iters_given || gemm_tf32_given;
+    if (gemm_case) {
+        if (mode != "gemm") {
+            std::fprintf(stderr, "GEMM case flags require --mode gemm\n");
+            return 1;
+        }
+        if (!(gemm_n_given && gemm_iters_given && gemm_tf32_given)) {
+            std::fprintf(stderr, "GEMM case requires --gemm-n, --gemm-iters and --gemm-tf32 together\n");
+            return 1;
+        }
+        if (gemm_tf32 != 0 && gemm_tf32 != 1) {
+            std::fprintf(stderr, "Invalid --gemm-tf32 value %d (expected 0 or 1)\n", gemm_tf32);
+            return 1;
+        }
     }
 
     if (!out_dir_given) {
@@ -136,19 +296,29 @@ int main(int argc, char** argv) {
     const std::string gemm_path = join_path(base_out, "gemm.csv");
 
     if (mode == "bw" || mode == "all") {
-        run_bw_sweep_to_csv(bw_path.c_str());
+        if (bw_case) {
+            run_bw_case_to_csv(bw_path.c_str(), bw_bytes, bw_iters, bw_block);
+        } else {
+            run_bw_sweep_to_csv(bw_path.c_str());
+        }
         std::printf("Wrote %s\n", bw_path.c_str());
     }
     if (mode == "compute" || mode == "all") {
-        run_compute_sweep_to_csv(compute_path.c_str());
+        if (compute_case) {
+            run_compute_case_to_csv(compute_path.c_str(), compute_dtype.c_str(), compute_block, compute_grid, compute_iters);
+        } else {
+            run_compute_sweep_to_csv(compute_path.c_str());
+        }
         std::printf("Wrote %s\n", compute_path.c_str());
     }
     if (mode == "gemm" || mode == "all") {
-        run_gemm_sweep_to_csv(gemm_path.c_str());
+        if (gemm_case) {
+            run_gemm_case_to_csv(gemm_path.c_str(), gemm_n, gemm_iters, gemm_tf32 == 1);
+        } else {
+            run_gemm_sweep_to_csv(gemm_path.c_str());
+        }
         std::printf("Wrote %s\n", gemm_path.c_str());
     }
 
     return 0;
 }
-
-

@@ -3,6 +3,8 @@ import argparse
 import csv
 from pathlib import Path
 
+from perf_targets import TEST_ORDER
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate benchmark CSV outputs")
@@ -136,13 +138,43 @@ def validate_energy(path: Path) -> None:
     if cols == modern:
         perf_key = "Perf"
         need_samples = True
+        expected_tests = set(TEST_ORDER)
+        expected_units = {
+            "BW peak": "GB/s",
+            "BW sustained": "GB/s",
+            "Compute FP32 peak": "GFLOP/s",
+            "Compute FP64 peak": "GFLOP/s",
+            "GEMM TF32=0 max": "GFLOP/s",
+            "GEMM TF32=1 max": "GFLOP/s",
+        }
     elif cols == legacy:
         perf_key = "Perf (baseline)"
         need_samples = False
+        expected_tests = {
+            "BW plateau",
+            "Compute FP32 peak",
+            "Compute FP64 peak",
+            "GEMM TF32=0 max",
+            "GEMM TF32=1 max",
+        }
+        expected_units = {
+            "BW plateau": "GB/s",
+            "Compute FP32 peak": "GFLOP/s",
+            "Compute FP64 peak": "GFLOP/s",
+            "GEMM TF32=0 max": "GFLOP/s",
+            "GEMM TF32=1 max": "GFLOP/s",
+        }
     else:
         fail(f"{path}: expected columns {sorted(modern)} or {sorted(legacy)}, got {list(rows[0].keys())}")
 
+    tests = [r["Test"].strip() for r in rows]
+    if set(tests) != expected_tests or len(tests) != len(expected_tests):
+        fail(f"{path}: unexpected test rows {tests}; expected exactly {sorted(expected_tests)}")
+
     for r in rows:
+        test = r["Test"].strip()
+        if r["Perf unit"].strip() != expected_units[test]:
+            fail(f"{path}: unexpected unit for '{test}': {r['Perf unit']}")
         if to_float(path, r, perf_key) <= 0:
             fail(f"{path}: {perf_key} must be > 0")
         if to_float(path, r, "Active power (W)") <= 0:
@@ -180,6 +212,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

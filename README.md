@@ -10,7 +10,7 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
   - `gemm`: cuBLAS SGEMM with TF32 on/off
 - Power telemetry via `nvidia-smi`
 - Plot generation scripts (per-GPU and cross-GPU)
-- Active-power efficiency summary
+- Active-power efficiency summary with per-target power logs
 - CSV validators for reproducibility checks
 - End-to-end automation by environment
 
@@ -120,9 +120,15 @@ scp -r <user_rtx>@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000
 This generates:
 
 - `results/compare/summary_compare.csv`
+- `results/compare/environment_compare.csv`
+- `results/compare/methodology_notes.txt`
 - `results/compare/perf_absolute_compare.png`
 - `results/compare/efficiency_compare.png`
 - `results/compare/speedup_a100_vs_rtx5000.png`
+
+The comparison summary reports both `BW peak` and `BW sustained`.
+Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s`.
+`environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
 
 ## Preflight (environment checks only)
 
@@ -213,6 +219,10 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 
 - Final performance values must come from non-profiled runs.
 - BW traffic is reported as read + write for copy kernel.
+- BW summaries distinguish `BW peak` (max observed GB/s) from `BW sustained` (last, largest-size sweep point).
+- Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`).
+- Power telemetry comes from `nvidia-smi` and reflects GPU-board power only; this project does not measure whole-node/system power.
+- Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - Active-power filtering uses an adaptive threshold based on observed SM clock.

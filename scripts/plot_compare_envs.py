@@ -1,27 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
-
-
-TEST_ORDER = [
-    "BW plateau",
-    "Compute FP32 peak",
-    "Compute FP64 peak",
-    "GEMM TF32=0 max",
-    "GEMM TF32=1 max",
-]
-
-TEST_LABEL = {
-    "BW plateau": "BW",
-    "Compute FP32 peak": "Compute FP32",
-    "Compute FP64 peak": "Compute FP64",
-    "GEMM TF32=0 max": "GEMM TF32=0",
-    "GEMM TF32=1 max": "GEMM TF32=1",
-}
+from perf_targets import TEST_LABEL, TEST_ORDER, load_perf_targets
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,55 +46,140 @@ def as_float(value: object, ctx: str) -> float:
     return out
 
 
-def max_or_fail(series: pd.Series, ctx: str) -> float:
-    if series.empty:
-        fail(f"No rows for {ctx}")
-    val = as_float(series.max(), ctx)
-    if val <= 0:
-        fail(f"Non-positive value for {ctx}: {val}")
-    return val
+def read_text_if_exists(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def parse_run_config(path: Path) -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    if not path.exists():
+        return cfg
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        cfg[key.strip()] = value.strip()
+    return cfg
+
+
+def extract_nvcc_version(text: str) -> str:
+    m = re.search(r"release\s+([0-9.]+)", text)
+    return m.group(1) if m else ""
+
+
+def first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def load_env_metadata(env_name: str, env_root: Path) -> dict[str, str]:
+    env_dir = env_root / "env"
+    cfg = parse_run_config(env_dir / "run_config.txt")
+    nvcc_text = read_text_if_exists(env_dir / "env_nvcc.txt")
+    python_text = read_text_if_exists(env_dir / "env_python.txt")
+
+    return {
+        "environment": env_name,
+        "host": cfg.get("host", "unknown"),
+        "gpu_name": cfg.get("gpu_name", "unknown"),
+        "git_commit": cfg.get("git_commit", "unknown"),
+        "driver_version": cfg.get("driver_version", "unknown"),
+        "cuda_driver_version": cfg.get("cuda_driver_version", "unknown"),
+        "nvcc_version": cfg.get("nvcc_version", extract_nvcc_version(nvcc_text) or "unknown"),
+        "python_version": cfg.get("python_version", first_nonempty_line(python_text) or "unknown"),
+        "sample_ms": cfg.get("sample_ms", "unknown"),
+        "bw_repeats": cfg.get("bw_repeats", "unknown"),
+        "compute_repeats": cfg.get("compute_repeats", "unknown"),
+        "gemm_repeats": cfg.get("gemm_repeats", "unknown"),
+        "power_telemetry_source": cfg.get("power_telemetry_source", "nvidia-smi"),
+        "power_scope": cfg.get("power_scope", "gpu_board"),
+        "node_power_not_measured": cfg.get("node_power_not_measured", "1"),
+    }
+
+
+def build_env_compare(a100_meta: dict[str, str], rtx_meta: dict[str, str]) -> pd.DataFrame:
+    field_specs = [
+        ("identity", "environment", False),
+        ("identity", "host", False),
+        ("identity", "gpu_name", False),
+        ("reproducibility", "git_commit", True),
+        ("software", "driver_version", True),
+        ("software", "cuda_driver_version", True),
+        ("software", "nvcc_version", True),
+        ("software", "python_version", True),
+        ("measurement", "sample_ms", True),
+        ("measurement", "bw_repeats", True),
+        ("measurement", "compute_repeats", True),
+        ("measurement", "gemm_repeats", True),
+        ("measurement", "power_telemetry_source", True),
+        ("measurement", "power_scope", True),
+        ("measurement", "node_power_not_measured", True),
+    ]
+
+    rows: list[dict[str, object]] = []
+    for category, field, expected_match in field_specs:
+        a100_value = a100_meta.get(field, "unknown")
+        rtx_value = rtx_meta.get(field, "unknown")
+        match = a100_value == rtx_value
+        missing = a100_value in {"", "unknown"} or rtx_value in {"", "unknown"}
+        status = "warning" if expected_match and (not match or missing) else "ok"
+        if not expected_match:
+            status = "info"
+        rows.append(
+            {
+                "category": category,
+                "field": field,
+                "a100": a100_value,
+                "rtx5000": rtx_value,
+                "match": match,
+                "expected_match": expected_match,
+                "status": status,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def write_methodology_notes(compare_meta: pd.DataFrame, out_path: Path) -> None:
+    warnings = compare_meta[compare_meta["status"] == "warning"]
+    lines = [
+        "Methodology notes for cross-environment comparison",
+        "",
+        "Warnings:",
+    ]
+
+    if warnings.empty:
+        lines.append("- No mismatches detected in strict-match metadata fields.")
+    else:
+        for _, row in warnings.iterrows():
+            lines.append(
+                f"- {row['field']}: A100='{row['a100']}' vs RTX5000='{row['rtx5000']}'"
+            )
+
+    lines.extend(
+        [
+            "",
+            "Measurement scope:",
+            "- Power telemetry comes from nvidia-smi.",
+            "- The reported power scope is GPU-board only; whole-node/system power is not measured by this project.",
+            "- Cross-environment comparisons should therefore be interpreted as GPU-centric, not node-level energy efficiency.",
+        ]
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Saved {out_path}")
 
 
 def load_performance(env_root: Path) -> dict[str, tuple[str, float]]:
-    baseline = env_root / "baseline"
-
-    bw_path = baseline / "bw.csv"
-    compute_path = baseline / "compute.csv"
-    gemm_path = baseline / "gemm.csv"
-
-    bw = read_csv(bw_path)
-    compute = read_csv(compute_path)
-    gemm = read_csv(gemm_path)
-
-    require_columns(bw_path, bw, {"bytes", "iters", "block", "GBs"})
-    require_columns(compute_path, compute, {"dtype", "block", "grid", "iters", "GFLOPs"})
-    require_columns(gemm_path, gemm, {"N", "iters", "tf32", "GFLOPs"})
-
-    c = compute.copy()
-    c["dtype"] = c["dtype"].astype(str).str.strip().str.lower()
-
-    g = gemm.copy()
-    g["tf32"] = pd.to_numeric(g["tf32"], errors="coerce")
-
-    perf = {
-        "BW plateau": ("GB/s", max_or_fail(pd.to_numeric(bw["GBs"], errors="coerce"), "BW plateau")),
-        "Compute FP32 peak": (
-            "GFLOP/s",
-            max_or_fail(pd.to_numeric(c.loc[c["dtype"] == "fp32", "GFLOPs"], errors="coerce"), "Compute FP32 peak"),
-        ),
-        "Compute FP64 peak": (
-            "GFLOP/s",
-            max_or_fail(pd.to_numeric(c.loc[c["dtype"] == "fp64", "GFLOPs"], errors="coerce"), "Compute FP64 peak"),
-        ),
-        "GEMM TF32=0 max": (
-            "GFLOP/s",
-            max_or_fail(pd.to_numeric(g.loc[g["tf32"] == 0, "GFLOPs"], errors="coerce"), "GEMM TF32=0 max"),
-        ),
-        "GEMM TF32=1 max": (
-            "GFLOP/s",
-            max_or_fail(pd.to_numeric(g.loc[g["tf32"] == 1, "GFLOPs"], errors="coerce"), "GEMM TF32=1 max"),
-        ),
-    }
+    perf: dict[str, tuple[str, float]] = {}
+    for target in load_perf_targets(env_root / "baseline"):
+        perf[target.test] = (target.perf_unit, target.perf)
     return perf
 
 
@@ -117,11 +187,17 @@ def load_efficiency(env_root: Path) -> dict[str, float]:
     path = env_root / "energy" / "efficiency_active_summary.csv"
     df = read_csv(path)
     require_columns(path, df, {"Test", "Efficiency (unit/W)"})
+    known_tests = set(df["Test"].astype(str).str.strip())
 
     out: dict[str, float] = {}
     for test in TEST_ORDER:
         row = df.loc[df["Test"].astype(str).str.strip() == test]
         if row.empty:
+            if test in {"BW peak", "BW sustained"} and "BW plateau" in known_tests:
+                fail(
+                    f"{path}: legacy BW row 'BW plateau' found. Regenerate the energy summary "
+                    "so it includes both 'BW peak' and 'BW sustained'."
+                )
             fail(f"{path}: missing test row '{test}'")
         val = as_float(row.iloc[0]["Efficiency (unit/W)"], f"{path}:{test}:Efficiency")
         if val <= 0:
@@ -138,7 +214,7 @@ def env_frame(env_name: str, env_root: Path) -> pd.DataFrame:
     for test in TEST_ORDER:
         p_unit, p_val = perf[test]
         rows.append({"test": test, "metric": "performance", "unit": p_unit, "value": p_val, "env": env_name})
-        rows.append({"test": test, "metric": "efficiency", "unit": "unit/W", "value": eff[test], "env": env_name})
+        rows.append({"test": test, "metric": "efficiency", "unit": f"{p_unit}/W", "value": eff[test], "env": env_name})
     return pd.DataFrame(rows)
 
 
@@ -167,28 +243,34 @@ def plot_grouped(compare_df: pd.DataFrame, metric: str, out_path: Path) -> None:
     if df.empty:
         fail(f"No rows to plot for metric={metric}")
 
-    labels = [TEST_LABEL.get(t, t) for t in df["test"].tolist()]
-    x = list(range(len(labels)))
-    w = 0.38
+    units = list(dict.fromkeys(df["unit"].astype(str).tolist()))
+    fig, axes = plt.subplots(len(units), 1, figsize=(11, 4.6 * len(units)), squeeze=False)
 
-    plt.figure(figsize=(11, 4.8))
-    plt.bar([i - w / 2 for i in x], df["a100"], width=w, label="A100")
-    plt.bar([i + w / 2 for i in x], df["rtx5000"], width=w, label="RTX5000")
+    for ax, unit in zip(axes.flat, units):
+        sub = df[df["unit"].astype(str) == unit].copy()
+        labels = [TEST_LABEL.get(t, t) for t in sub["test"].tolist()]
+        x = list(range(len(labels)))
+        w = 0.38
 
-    plt.xticks(x, labels, rotation=20, ha="right")
+        ax.bar([i - w / 2 for i in x], sub["a100"], width=w, label="A100")
+        ax.bar([i + w / 2 for i in x], sub["rtx5000"], width=w, label="RTX5000")
+        ax.set_xticks(x, labels, rotation=20, ha="right")
+        ax.set_ylabel(unit)
+        ax.grid(axis="y", alpha=0.3)
+        ax.legend()
+        if metric == "performance":
+            ax.set_title(f"Absolute Performance ({unit})")
+        else:
+            ax.set_title(f"Energy Efficiency ({unit})")
+
     if metric == "performance":
-        plt.ylabel("Performance (native units)")
-        plt.title("A100 vs RTX5000: Absolute Performance")
+        fig.suptitle("A100 vs RTX5000: Absolute Performance", y=0.99)
     else:
-        plt.ylabel("Efficiency (unit/W)")
-        plt.title("A100 vs RTX5000: Energy Efficiency")
-    plt.grid(axis="y", alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-
+        fig.suptitle("A100 vs RTX5000: Energy Efficiency", y=0.99)
+    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
     print(f"Saved {out_path}")
 
 
@@ -222,12 +304,19 @@ def main() -> None:
     a100_df = env_frame("a100", a100_root)
     rtx_df = env_frame("rtx5000", rtx_root)
     compare_df = build_compare_table(a100_df, rtx_df)
+    compare_meta = build_env_compare(load_env_metadata("a100", a100_root), load_env_metadata("rtx5000", rtx_root))
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary_path = output_dir / "summary_compare.csv"
     compare_df.to_csv(summary_path, index=False)
     print(f"Saved {summary_path}")
+
+    meta_path = output_dir / "environment_compare.csv"
+    compare_meta.to_csv(meta_path, index=False)
+    print(f"Saved {meta_path}")
+
+    write_methodology_notes(compare_meta, output_dir / "methodology_notes.txt")
 
     plot_grouped(compare_df, "performance", output_dir / "perf_absolute_compare.png")
     plot_grouped(compare_df, "efficiency", output_dir / "efficiency_compare.png")

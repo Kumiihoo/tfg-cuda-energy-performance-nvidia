@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+from perf_targets import load_perf_targets
 
 
 POWER_COLS = ["ts", "pstate", "power", "sm", "mem", "temp"]
@@ -29,18 +30,6 @@ def parse_args() -> argparse.Namespace:
         help="Absolute lower bound for active threshold in MHz (default: 300)",
     )
     return parser.parse_args()
-
-
-def choose_perf_file(perf_dir: Path, stem: str) -> Path:
-    candidates = [
-        perf_dir / f"{stem}.csv",
-        perf_dir / f"{stem}_baseline.csv",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError(f"Missing performance CSV for '{stem}' in {perf_dir}")
-
 
 def _to_numeric(series: pd.Series) -> pd.Series:
     # Accept logs with or without units and both decimal separators.
@@ -113,94 +102,27 @@ def main() -> None:
 
     perf_dir = Path(args.perf_dir)
     power_dir = Path(args.power_dir)
+    targets = load_perf_targets(perf_dir)
 
-    bw_file = choose_perf_file(perf_dir, "bw")
-    compute_file = choose_perf_file(perf_dir, "compute")
-    gemm_file = choose_perf_file(perf_dir, "gemm")
-
-    bw = pd.read_csv(bw_file)
-    bw_plateau = float(bw["GBs"].iloc[-1])
-
-    comp = pd.read_csv(compute_file)
-    fp32 = float(comp[comp["dtype"] == "fp32"]["GFLOPs"].max())
-    fp64 = float(comp[comp["dtype"] == "fp64"]["GFLOPs"].max())
-
-    gemm = pd.read_csv(gemm_file)
-    g0 = float(gemm[gemm["tf32"] == 0]["GFLOPs"].max())
-    g1 = float(gemm[gemm["tf32"] == 1]["GFLOPs"].max())
-
-    bw_stats = active_power_stats(
-        load_power_log(power_dir / "power_bw_long.csv"), args.active_ratio, args.active_floor_mhz
-    )
-    comp_stats = active_power_stats(
-        load_power_log(power_dir / "power_compute_long.csv"), args.active_ratio, args.active_floor_mhz
-    )
-    gemm_stats = active_power_stats(
-        load_power_log(power_dir / "power_gemm_long.csv"), args.active_ratio, args.active_floor_mhz
-    )
-
-    rows = [
-        (
-            "BW plateau",
-            "GB/s",
-            bw_plateau,
-            bw_stats["power_w"],
-            bw_plateau / bw_stats["power_w"],
-            bw_stats["threshold_mhz"],
-            bw_stats["active_pct"],
-            bw_stats["samples"],
-            bw_stats["peak_sm_mhz"],
-            bw_stats["fallback_all_samples"],
-        ),
-        (
-            "Compute FP32 peak",
-            "GFLOP/s",
-            fp32,
-            comp_stats["power_w"],
-            fp32 / comp_stats["power_w"],
-            comp_stats["threshold_mhz"],
-            comp_stats["active_pct"],
-            comp_stats["samples"],
-            comp_stats["peak_sm_mhz"],
-            comp_stats["fallback_all_samples"],
-        ),
-        (
-            "Compute FP64 peak",
-            "GFLOP/s",
-            fp64,
-            comp_stats["power_w"],
-            fp64 / comp_stats["power_w"],
-            comp_stats["threshold_mhz"],
-            comp_stats["active_pct"],
-            comp_stats["samples"],
-            comp_stats["peak_sm_mhz"],
-            comp_stats["fallback_all_samples"],
-        ),
-        (
-            "GEMM TF32=0 max",
-            "GFLOP/s",
-            g0,
-            gemm_stats["power_w"],
-            g0 / gemm_stats["power_w"],
-            gemm_stats["threshold_mhz"],
-            gemm_stats["active_pct"],
-            gemm_stats["samples"],
-            gemm_stats["peak_sm_mhz"],
-            gemm_stats["fallback_all_samples"],
-        ),
-        (
-            "GEMM TF32=1 max",
-            "GFLOP/s",
-            g1,
-            gemm_stats["power_w"],
-            g1 / gemm_stats["power_w"],
-            gemm_stats["threshold_mhz"],
-            gemm_stats["active_pct"],
-            gemm_stats["samples"],
-            gemm_stats["peak_sm_mhz"],
-            gemm_stats["fallback_all_samples"],
-        ),
-    ]
+    rows = []
+    for target in targets:
+        stats = active_power_stats(
+            load_power_log(power_dir / target.power_log_name), args.active_ratio, args.active_floor_mhz
+        )
+        rows.append(
+            (
+                target.test,
+                target.perf_unit,
+                target.perf,
+                stats["power_w"],
+                target.perf / stats["power_w"],
+                stats["threshold_mhz"],
+                stats["active_pct"],
+                stats["samples"],
+                stats["peak_sm_mhz"],
+                stats["fallback_all_samples"],
+            )
+        )
 
     out = pd.DataFrame(
         rows,
@@ -228,4 +150,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
