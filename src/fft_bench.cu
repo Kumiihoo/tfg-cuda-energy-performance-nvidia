@@ -27,6 +27,11 @@ static void checkCufft(cufftResult status, const char* msg) {
 class FftCaseRunner {
 public:
     FftCaseRunner(int n, int batch, int iters) : n_(n), batch_(batch), iters_(iters) {
+        if (n_ <= 0 || batch_ <= 0 || iters_ <= 0) {
+            std::fprintf(stderr, "FFT case requires n > 0, batch > 0 and iters > 0\n");
+            std::exit(1);
+        }
+
         checkCuda(cudaMalloc((void**)&data_, buffer_bytes()), "cudaMalloc fft buffer");
         checkCuda(cudaMemset(data_, 0, buffer_bytes()), "cudaMemset fft buffer");
         checkCufft(cufftPlan1d(&plan_, n_, CUFFT_C2C, batch_), "cufftPlan1d");

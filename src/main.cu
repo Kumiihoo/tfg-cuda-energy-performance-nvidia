@@ -136,6 +136,28 @@ static std::string format_utc_timestamp(std::chrono::system_clock::time_point tp
     return out;
 }
 
+static std::string format_local_timestamp(std::chrono::system_clock::time_point tp) {
+    using namespace std::chrono;
+    const auto ms = duration_cast<milliseconds>(tp.time_since_epoch()) % 1000;
+    const std::time_t tt = system_clock::to_time_t(tp);
+
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+
+    char base[32];
+    char offset[8];
+    std::strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
+    std::strftime(offset, sizeof(offset), "%z", &tm);
+
+    char out[48];
+    std::snprintf(out, sizeof(out), "%s.%03lld%s", base, static_cast<long long>(ms.count()), offset);
+    return out;
+}
+
 static void write_bw_result_csv(const std::string& path, size_t bytes, int iters, int block, double gbs) {
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
@@ -197,7 +219,9 @@ static void write_energy_meta_csv(const std::string& path,
                                   double wall_ms,
                                   long long case_repeats,
                                   const std::string& run_start_utc,
-                                  const std::string& run_end_utc) {
+                                  const std::string& run_end_utc,
+                                  const std::string& run_start_local,
+                                  const std::string& run_end_local) {
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         perror("fopen");
@@ -205,8 +229,8 @@ static void write_energy_meta_csv(const std::string& path,
     }
 
     std::fprintf(f,
-                 "case_key,params,perf_unit,avg_perf,target_duration_ms,measured_work_ms,wall_ms,case_repeats,run_start_utc,run_end_utc\n");
-    std::fprintf(f, "%s,%s,%s,%.6f,%.3f,%.3f,%.3f,%lld,%s,%s\n",
+                 "case_key,params,perf_unit,avg_perf,target_duration_ms,measured_work_ms,wall_ms,case_repeats,run_start_utc,run_end_utc,run_start_local,run_end_local\n");
+    std::fprintf(f, "%s,%s,%s,%.6f,%.3f,%.3f,%.3f,%lld,%s,%s,%s,%s\n",
                  csv_escape(case_key).c_str(),
                  csv_escape(params).c_str(),
                  csv_escape(perf_unit).c_str(),
@@ -216,7 +240,9 @@ static void write_energy_meta_csv(const std::string& path,
                  wall_ms,
                  case_repeats,
                  csv_escape(run_start_utc).c_str(),
-                 csv_escape(run_end_utc).c_str());
+                 csv_escape(run_end_utc).c_str(),
+                 csv_escape(run_start_local).c_str(),
+                 csv_escape(run_end_local).c_str());
     std::fclose(f);
 }
 
@@ -404,6 +430,14 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "BW case requires --bw-bytes, --bw-iters and --bw-block together\n");
             return 1;
         }
+        if (bw_bytes == 0 || bw_iters <= 0 || bw_block <= 0) {
+            std::fprintf(stderr, "BW case requires --bw-bytes > 0, --bw-iters > 0 and --bw-block > 0\n");
+            return 1;
+        }
+        if ((bw_bytes % sizeof(float)) != 0) {
+            std::fprintf(stderr, "BW case requires --bw-bytes to be a multiple of %zu\n", sizeof(float));
+            return 1;
+        }
     }
 
     const bool compute_case = compute_dtype_given || compute_block_given || compute_grid_given || compute_iters_given;
@@ -421,6 +455,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Invalid compute dtype '%s'\n", compute_dtype.c_str());
             return 1;
         }
+        if (compute_block <= 0 || compute_grid <= 0 || compute_iters <= 0) {
+            std::fprintf(stderr, "Compute case requires --compute-block > 0, --compute-grid > 0 and --compute-iters > 0\n");
+            return 1;
+        }
     }
 
     const bool gemm_case = gemm_n_given || gemm_iters_given || gemm_tf32_given;
@@ -431,6 +469,10 @@ int main(int argc, char** argv) {
         }
         if (!(gemm_n_given && gemm_iters_given && gemm_tf32_given)) {
             std::fprintf(stderr, "GEMM case requires --gemm-n, --gemm-iters and --gemm-tf32 together\n");
+            return 1;
+        }
+        if (gemm_n <= 0 || gemm_iters <= 0) {
+            std::fprintf(stderr, "GEMM case requires --gemm-n > 0 and --gemm-iters > 0\n");
             return 1;
         }
         if (gemm_tf32 != 0 && gemm_tf32 != 1) {
@@ -575,7 +617,9 @@ int main(int argc, char** argv) {
                               result.wall_ms,
                               result.case_repeats,
                               format_utc_timestamp(result.run_start),
-                              format_utc_timestamp(result.run_end));
+                              format_utc_timestamp(result.run_end),
+                              format_local_timestamp(result.run_start),
+                              format_local_timestamp(result.run_end));
         std::printf("Wrote %s\n", energy_meta_out.c_str());
         return 0;
     }

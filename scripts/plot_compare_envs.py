@@ -111,7 +111,7 @@ def build_env_compare(a100_meta: dict[str, str], rtx_meta: dict[str, str]) -> pd
         ("identity", "environment", False),
         ("identity", "host", False),
         ("identity", "gpu_name", False),
-        ("reproducibility", "git_commit", True),
+        ("reproducibility", "git_commit", False),
         ("software", "driver_version", True),
         ("software", "cuda_driver_version", True),
         ("software", "nvcc_version", True),
@@ -150,6 +150,7 @@ def build_env_compare(a100_meta: dict[str, str], rtx_meta: dict[str, str]) -> pd
 
 def write_methodology_notes(compare_meta: pd.DataFrame, out_path: Path) -> None:
     warnings = compare_meta[compare_meta["status"] == "warning"]
+    git_info = compare_meta[compare_meta["field"].astype(str) == "git_commit"]
     lines = [
         "Methodology notes for cross-environment comparison",
         "",
@@ -162,6 +163,20 @@ def write_methodology_notes(compare_meta: pd.DataFrame, out_path: Path) -> None:
         for _, row in warnings.iterrows():
             lines.append(
                 f"- {row['field']}: A100='{row['a100']}' vs RTX5000='{row['rtx5000']}'"
+            )
+
+    if not git_info.empty:
+        row = git_info.iloc[0]
+        a100_value = str(row["a100"])
+        rtx_value = str(row["rtx5000"])
+        if a100_value != rtx_value or a100_value in {"", "unknown"} or rtx_value in {"", "unknown"}:
+            lines.extend(
+                [
+                    "",
+                    "Informational reproducibility metadata:",
+                    f"- git_commit: A100='{a100_value}' vs RTX5000='{rtx_value}'",
+                    "  This field is optional and does not block comparison, but matching commits are still recommended.",
+                ]
             )
 
     lines.extend(

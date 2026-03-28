@@ -24,21 +24,31 @@ pick_python() {
     echo "$PYTHON_BIN"
     return
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    echo "python3"
+
+  if command -v python >/dev/null 2>&1 && python -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
+    echo "python"
     return
   fi
-  if command -v python >/dev/null 2>&1; then
-    echo "python"
+
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
+    echo "python3"
     return
   fi
   echo ""
 }
 
+require_python3() {
+  local bin="$1"
+  if ! "$bin" -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
+    echo "Error: '$bin' must resolve to a Python 3 interpreter" >&2
+    exit 1
+  fi
+}
+
 A100_ROOT=""
 RTX5000_ROOT=""
 OUTPUT_DIR=""
-PYTHON_BIN=""
+PYTHON_BIN="${PYTHON_BIN:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -86,6 +96,7 @@ if [[ -z "$PYTHON_BIN" ]]; then
   echo "Error: python3/python not found" >&2
   exit 1
 fi
+require_python3 "$PYTHON_BIN"
 
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/plot_compare_envs.py" \
   --a100-root "$A100_ROOT" \
@@ -96,4 +107,3 @@ fi
   --compare-dir "$OUTPUT_DIR"
 
 echo "Done: comparison artifacts generated in $OUTPUT_DIR"
-

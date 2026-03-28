@@ -22,6 +22,10 @@ META_REQUIRED_COLS = {
     "run_start_utc",
     "run_end_utc",
 }
+META_LOCAL_COLS = {
+    "run_start_local",
+    "run_end_local",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +82,13 @@ def _parse_power_timestamps(series: pd.Series) -> pd.Series:
     if missing.any():
         parsed.loc[missing] = pd.to_datetime(text.loc[missing], errors="coerce")
     return parsed
+
+
+def _naive_local_timestamp(value: str) -> pd.Timestamp:
+    ts = pd.to_datetime(value)
+    if getattr(ts, "tzinfo", None) is not None:
+        return ts.tz_localize(None)
+    return ts
 
 
 def _local_naive_from_utc(value: str) -> pd.Timestamp:
@@ -139,8 +150,13 @@ def load_energy_meta(path: Path) -> dict[str, object]:
     meta["measured_work_ms"] = float(meta["measured_work_ms"])
     meta["wall_ms"] = float(meta["wall_ms"])
     meta["case_repeats"] = int(float(meta["case_repeats"]))
-    meta["run_start_local"] = _local_naive_from_utc(str(meta["run_start_utc"]))
-    meta["run_end_local"] = _local_naive_from_utc(str(meta["run_end_utc"]))
+
+    if META_LOCAL_COLS.issubset(df.columns):
+        meta["run_start_local"] = _naive_local_timestamp(str(row["run_start_local"]))
+        meta["run_end_local"] = _naive_local_timestamp(str(row["run_end_local"]))
+    else:
+        meta["run_start_local"] = _local_naive_from_utc(str(meta["run_start_utc"]))
+        meta["run_end_local"] = _local_naive_from_utc(str(meta["run_end_utc"]))
     return meta
 
 
@@ -218,7 +234,9 @@ def main() -> None:
             raise ValueError(
                 f"{meta_path}: perf_unit='{meta_perf_unit}' does not match target perf unit '{target.perf_unit}'"
             )
-        if meta_case_key and meta_case_key != target.case_key:
+        if not meta_case_key:
+            raise ValueError(f"{meta_path}: missing non-empty case_key for target '{target.case_key}'")
+        if meta_case_key != target.case_key:
             raise ValueError(
                 f"{meta_path}: case_key='{meta_case_key}' does not match expected target case '{target.case_key}'"
             )

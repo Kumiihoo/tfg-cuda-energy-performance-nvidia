@@ -47,15 +47,18 @@ CUDA/C++ benchmark suite for performance and energy-efficiency analysis across N
 - CUDA Toolkit (validated with CUDA 11.8+ toolchains)
 - CMake >= 3.18
 - `make`
-- C++ compiler (`g++` or compatible)
+- C++ compiler (`g++`, as required by the current automation scripts)
 - `nvidia-smi` (driver CLI; required)
 - `nsys` (Nsight Systems CLI; required only when using `--profile` / `--profile-only`)
 - Python 3 with packages in `requirements.txt`
+- `git` optional: used only to stamp `git_commit` in `run_config.txt` when available
 
 Install Python deps:
 
 ```bash
-python -m pip install -r requirements.txt
+PYTHON_BIN=python
+command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1 || PYTHON_BIN=python3
+"$PYTHON_BIN" -m pip install -r requirements.txt
 ```
 
 ## Build
@@ -76,8 +79,13 @@ Run full campaign for one environment (build, baseline, long-run power logs, eff
 
 ```bash
 chmod +x scripts/run_campaign.sh
-./scripts/run_campaign.sh --env a100 --gpu 0 --profile
-./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile
+nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
+
+# Pick the NVIDIA GPU index that matches the board you want to benchmark.
+export GPU_INDEX=0  # replace 0 with the NVIDIA index reported by nvidia-smi
+
+./scripts/run_campaign.sh --env a100 --gpu "$GPU_INDEX" --profile
+./scripts/run_campaign.sh --env rtx5000 --gpu "$GPU_INDEX" --profile
 ```
 
 Useful flags:
@@ -105,13 +113,20 @@ Useful flags:
 ./scripts/run_campaign.sh --env rtx5000 --profile-only --skip-build
 ```
 
+Runner argument constraints:
+
+- `--gpu` must be a non-negative NVIDIA `nvidia-smi` GPU index; the runner resolves it to the matching GPU UUID so `nvidia-smi` logging and CUDA execution target the same physical board.
+- `--sample-ms` and `--energy-duration-ms` must be positive integers.
+- `--stable-window-trim` must stay in `[0, 0.5)`.
+- For case-specific `bench` runs, numeric case parameters must be `> 0`; `--bw-bytes` must also be a multiple of `sizeof(float)`.
+
 Each campaign stores execution metadata in:
 
 ```text
 results/<env>/env/run_config.txt
 ```
 
-This file is part of the reproducibility artifacts (host, GPU, driver/CUDA versions, sampling period, long-run duration, trim ratio, flags, command line, paths).
+This file is part of the reproducibility artifacts (host, GPU, driver/CUDA versions, sampling period, long-run duration, trim ratio, flags, command line, paths, and `git_commit` when available).
 
 ## Cross-environment comparison (A100 vs RTX5000)
 
@@ -125,7 +140,7 @@ chmod +x scripts/run_compare.sh
 If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison, for example:
 
 ```bash
-scp -r <user_rtx>@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
 ```
 
 This generates:
@@ -141,6 +156,9 @@ The comparison summary reports both `BW peak` and `BW sustained`, and now includ
 FFT currently contributes to the performance comparison only; the efficiency comparison still covers the original energy-tracked cases.
 Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s` or `MSamples/s`.
 `environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
+`run_compare.sh` now fails validation when strict-match methodology fields differ across environments.
+Those strict-match fields include driver/CUDA driver versions, `nvcc`, Python version, sampling period, energy duration, trim ratio, and the documented telemetry/scope metadata.
+`git_commit` is exported as informational reproducibility metadata when `git` is available, but missing `git` no longer blocks cross-environment comparison.
 
 ## Preflight (environment checks only)
 
@@ -153,22 +171,39 @@ cd ~/tfg
 # 2) Activate virtual environment (venv or .venv)
 source venv/bin/activate 2>/dev/null || source .venv/bin/activate 2>/dev/null || true
 
-# 3) Install Python deps
-python -m pip install -r requirements.txt
+# 3) Select the Python 3 interpreter that will also be used by the automation scripts
+export PYTHON_BIN=python
+command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1 || export PYTHON_BIN=python3
 
-# 4) Normalize line endings and script permissions
+# 4) Install Python deps into that same interpreter
+"$PYTHON_BIN" -m pip install -r requirements.txt
+
+# 5) Normalize line endings and script permissions
 sed -i 's/\r$//' scripts/*.sh
 chmod +x scripts/run_campaign.sh scripts/run_compare.sh scripts/power_logger.sh
 
-# 5) Check CUDA compiler path
+# 6) Check shell and CUDA compiler paths
+which bash
 which nvcc
 
-# 6) Check Nsight Systems path (needed for profiling)
-which nsys
+# 7) Check build/runtime tools required by run_campaign.sh
+which cmake
+which make
+which g++
 
-# 7) Check driver/GPU visibility
+# 8) Check Nsight Systems path (needed only for --profile / --profile-only)
+which nsys || echo "nsys not found: profiling will be unavailable"
+
+# 9) Check driver/GPU visibility and note the GPU index you will pass to --gpu
+nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
 nvidia-smi | head -n 5
+
+# 10) Verify the automation scripts parse correctly after line-ending normalization
+./scripts/run_campaign.sh --help >/dev/null
+./scripts/run_compare.sh --help >/dev/null
 ```
+
+For reproducible A100 vs RTX5000 comparisons, keep `--sample-ms`, `--energy-duration-ms`, and `--stable-window-trim` identical across servers, and avoid stack drift in driver/CUDA/`nvcc`/Python versions. If `git` is available on both servers, running both campaigns from the same repo commit is still strongly recommended for traceability, but it is no longer required to make `run_compare.sh` succeed.
 
 ## Two-server execution (A100 + RTX5000)
 
@@ -176,22 +211,33 @@ Typical sequence:
 
 ```bash
 # On A100 server
-./scripts/run_campaign.sh --env a100 --gpu 0 --profile
+nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
+export A100_GPU_INDEX=0  # replace 0 with the A100 NVIDIA index reported by nvidia-smi
+./scripts/run_campaign.sh --env a100 --gpu "$A100_GPU_INDEX" --sample-ms 10 --energy-duration-ms 2000 --stable-window-trim 0.15 --profile
 
 # On RTX5000 server
-./scripts/run_campaign.sh --env rtx5000 --gpu 0 --profile
+nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
+export RTX5000_GPU_INDEX=0  # replace 0 with the RTX5000 NVIDIA index reported by nvidia-smi
+./scripts/run_campaign.sh --env rtx5000 --gpu "$RTX5000_GPU_INDEX" --sample-ms 10 --energy-duration-ms 2000 --stable-window-trim 0.15 --profile
 
 # Back on A100 server: copy RTX5000 results and compare
-scp -r <user_rtx>@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
 ./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
 ```
 
 ## Validation commands (manual)
 
+Reuse the same `PYTHON_BIN` selected in the preflight step, or re-run the interpreter selection first:
+
+```bash
+export PYTHON_BIN="${PYTHON_BIN:-python}"
+command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1 || export PYTHON_BIN=python3
+```
+
 Single environment:
 
 ```bash
-python scripts/validate_results.py \
+"$PYTHON_BIN" scripts/validate_results.py \
   --results-dir results/a100/baseline \
   --energy-summary results/a100/energy/efficiency_active_summary.csv
 ```
@@ -199,7 +245,7 @@ python scripts/validate_results.py \
 Cross environment:
 
 ```bash
-python scripts/validate_compare.py --compare-dir results/compare
+"$PYTHON_BIN" scripts/validate_compare.py --compare-dir results/compare
 ```
 
 ## Profiling
@@ -207,11 +253,14 @@ python scripts/validate_compare.py --compare-dir results/compare
 Use Nsight Systems for timeline evidence, not for final throughput tables.
 
 ```bash
+# Select the NVIDIA GPU index first if not already exported in this shell
+export GPU_INDEX="${GPU_INDEX:-0}"  # replace 0 with the NVIDIA index reported by nvidia-smi
+
 # Automatic profiling (bw + compute + gemm) at end of campaign
-./scripts/run_campaign.sh --env a100 --gpu 0 --profile
+./scripts/run_campaign.sh --env a100 --gpu "$GPU_INDEX" --profile
 
 # Profiling only (bw + compute + gemm)
-./scripts/run_campaign.sh --env a100 --gpu 0 --profile-only --skip-build
+./scripts/run_campaign.sh --env a100 --gpu "$GPU_INDEX" --profile-only --skip-build
 
 # Expected artifacts
 ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
@@ -234,14 +283,18 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - BW summaries distinguish `BW peak` (max observed GB/s) from `BW sustained` (last, largest-size sweep point).
 - Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`).
 - Energy runs execute each selected case in-process until the requested duration is reached, instead of stitching together many short process invocations.
-- Each energy case writes a metadata CSV with measured work time, wall time, case repeats, and benchmark start/end timestamps.
+- Each energy case writes a metadata CSV with measured work time, wall time, case repeats, UTC timestamps, and source-host local wall-clock timestamps for the benchmark interval.
 - Campaign runs pass an explicit energy `case_key` into the metadata so each power log can be matched back to the selected baseline target deterministically.
+- `run_campaign.sh` validates its public numeric CLI arguments early: `--gpu >= 0`, `--sample-ms > 0`, `--energy-duration-ms > 0`, and `--stable-window-trim in [0, 0.5)`.
+- `run_campaign.sh` resolves `--gpu` from an NVIDIA driver index to the matching GPU UUID before launching the logger, CUDA benchmark, or Nsight profiling, so all three stages address the same physical GPU.
 - Power telemetry comes from `nvidia-smi` and reflects GPU-board power only; this project does not measure whole-node/system power.
+- `git_commit` is recorded in `run_config.txt` when `git` is available, but it is treated as informational metadata rather than a strict comparison blocker.
 - Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.
 - FFT is currently integrated as a baseline/control benchmark plus cross-environment performance comparison; it is not yet part of the automated energy summary target set.
 - Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps with strict overlap, then trim the configured fraction from the beginning and end of that run window.
+- Stable-window recropping uses the local benchmark timestamps recorded in the metadata, so summaries can be recomputed on another machine without depending on that machine's current timezone.
 - In `efficiency_active_summary.csv`, `Perf` now refers to the long-run execution used for power; baseline performance is retained as an audit column so power and efficiency come from the same run.
 - SM clock is retained as a diagnostic signal, not as the primary definition of activity.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -56,6 +57,11 @@ def fail(msg: str) -> None:
     raise ValueError(msg)
 
 
+def expect_close(path: Path, label: str, actual: float, expected: float, *, rel_tol: float = 1e-6, abs_tol: float = 1e-6) -> None:
+    if not math.isclose(actual, expected, rel_tol=rel_tol, abs_tol=abs_tol):
+        fail(f"{path}: unexpected {label}: got {actual}, expected {expected}")
+
+
 def check_files(compare_dir: Path) -> None:
     for name in REQUIRED_FILES:
         path = compare_dir / name
@@ -96,12 +102,17 @@ def check_summary(path: Path) -> None:
     if eff_units != EXPECTED_UNITS["efficiency"]:
         fail(f"{path}: unexpected efficiency units {sorted(eff_units)}")
 
-    for col in ["a100", "rtx5000", "ratio_a100_vs_rtx5000"]:
+    for col in ["a100", "rtx5000", "ratio_a100_vs_rtx5000", "delta_percent"]:
         values = pd.to_numeric(df[col], errors="coerce")
         if values.isna().any():
             fail(f"{path}: non-numeric values in {col}")
-        if (values <= 0).any():
+        if col != "delta_percent" and (values <= 0).any():
             fail(f"{path}: non-positive values in {col}")
+
+    for _, row in df.iterrows():
+        ratio = float(row["ratio_a100_vs_rtx5000"])
+        delta = float(row["delta_percent"])
+        expect_close(path, f"delta_percent for test='{row['test']}' metric='{row['metric']}'", delta, (ratio - 1.0) * 100.0)
 
 
 def check_env_compare(path: Path) -> None:
@@ -116,6 +127,11 @@ def check_env_compare(path: Path) -> None:
     statuses = set(df["status"].astype(str))
     if not statuses.issubset(ENV_COMPARE_STATUSES):
         fail(f"{path}: unexpected status values {sorted(statuses)}")
+
+    warnings = df[df["status"].astype(str) == "warning"].copy()
+    if not warnings.empty:
+        fields = sorted(set(warnings["field"].astype(str)))
+        fail(f"{path}: methodology mismatches detected in strict-match metadata fields {fields}")
 
     required_fields = {
         "environment",

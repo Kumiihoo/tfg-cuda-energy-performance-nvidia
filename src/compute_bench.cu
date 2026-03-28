@@ -55,6 +55,11 @@ class ComputeCaseRunner {
 public:
     ComputeCaseRunner(const char* dtype, int block, int grid, int iters)
         : block_(block), grid_(grid), iters_(iters) {
+        if (block_ <= 0 || grid_ <= 0 || iters_ <= 0) {
+            std::fprintf(stderr, "Compute case requires block > 0, grid > 0 and iters > 0\n");
+            std::exit(1);
+        }
+
         fp64_ = std::strcmp(dtype, "fp64") == 0;
         if (!fp64_ && std::strcmp(dtype, "fp32") != 0) {
             std::fprintf(stderr, "Unsupported compute dtype '%s'\n", dtype);

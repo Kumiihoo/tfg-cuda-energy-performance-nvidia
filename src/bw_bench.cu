@@ -39,6 +39,23 @@ static bool try_alloc(float** ptr, size_t bytes, const char* tag) {
 class BwCaseRunner {
 public:
     BwCaseRunner(size_t bytes, int iters, int block) : bytes_(bytes), iters_(iters), block_(block) {
+        if (bytes_ == 0) {
+            std::fprintf(stderr, "BW case requires bytes > 0\n");
+            std::exit(1);
+        }
+        if (iters_ <= 0) {
+            std::fprintf(stderr, "BW case requires iters > 0\n");
+            std::exit(1);
+        }
+        if (block_ <= 0) {
+            std::fprintf(stderr, "BW case requires block > 0\n");
+            std::exit(1);
+        }
+        if ((bytes_ % sizeof(float)) != 0) {
+            std::fprintf(stderr, "BW case requires bytes to be a multiple of %zu\n", sizeof(float));
+            std::exit(1);
+        }
+
         n_ = bytes_ / sizeof(float);
         if (n_ == 0) {
             std::fprintf(stderr, "BW case requires at least one float element\n");

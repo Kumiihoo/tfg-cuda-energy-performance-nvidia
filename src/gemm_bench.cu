@@ -30,6 +30,11 @@ static void checkCublas(cublasStatus_t s, const char* msg) {
 class GemmCaseRunner {
 public:
     GemmCaseRunner(int n, int iters, bool tf32) : n_(n), iters_(iters), tf32_(tf32) {
+        if (n_ <= 0 || iters_ <= 0) {
+            std::fprintf(stderr, "GEMM case requires N > 0 and iters > 0\n");
+            std::exit(1);
+        }
+
         checkCublas(cublasCreate(&handle_), "cublasCreate");
         checkCublas(cublasSetMathMode(handle_, tf32_ ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH),
                     "cublasSetMathMode");

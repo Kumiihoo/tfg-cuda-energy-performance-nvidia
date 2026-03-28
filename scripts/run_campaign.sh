@@ -8,10 +8,10 @@ Usage:
 
 Options:
   --env NAME              Environment name: a100 or rtx5000 (required)
-  --gpu ID                CUDA visible GPU index (default: 0)
-  --sample-ms N           Power sampling period in ms (default: 10)
-  --energy-duration-ms N  Target in-process duration for each energy case in ms (default: 2000)
-  --stable-window-trim X  Fraction trimmed from start/end of run window (default: 0.15)
+  --gpu ID                NVIDIA/nvidia-smi GPU index, resolved to UUID internally (default: 0)
+  --sample-ms N           Power sampling period in ms, positive integer (default: 10)
+  --energy-duration-ms N  Target in-process duration for each energy case in ms, positive integer (default: 2000)
+  --stable-window-trim X  Fraction trimmed from start/end of run window, decimal in [0, 0.5) (default: 0.15)
   --skip-baseline         Skip baseline run (useful to resume energy/plots/validation)
   --skip-build            Skip cmake configure/build step
   --install-python-deps   Run pip install -r requirements.txt before execution
@@ -31,6 +31,51 @@ require_cmd() {
     echo "Error: required command '$1' is not in PATH" >&2
     exit 1
   fi
+}
+
+require_python3() {
+  local bin="$1"
+  if ! "$bin" -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
+    echo "Error: '$bin' must resolve to a Python 3 interpreter" >&2
+    exit 1
+  fi
+}
+
+require_non_negative_int() {
+  local value="$1"
+  local name="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "Error: $name must be a non-negative integer, got '$value'" >&2
+    exit 1
+  fi
+}
+
+require_positive_int() {
+  local value="$1"
+  local name="$2"
+  require_non_negative_int "$value" "$name"
+  if (( value <= 0 )); then
+    echo "Error: $name must be > 0, got '$value'" >&2
+    exit 1
+  fi
+}
+
+require_trim_ratio() {
+  local value="$1"
+  local name="$2"
+  if [[ ! "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+    echo "Error: $name must be a decimal value in [0, 0.5), got '$value'" >&2
+    exit 1
+  fi
+
+  "$PYTHON_BIN" - "$value" "$name" <<'PY'
+import sys
+
+value = float(sys.argv[1])
+name = sys.argv[2]
+if not (0.0 <= value < 0.5):
+    raise SystemExit(f"Error: {name} must be in [0, 0.5), got '{sys.argv[1]}'")
+PY
 }
 
 CURRENT_LOGGER_PID=""
@@ -114,15 +159,35 @@ pick_python() {
     echo "$PYTHON_BIN"
     return
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    echo "python3"
-    return
-  fi
-  if command -v python >/dev/null 2>&1; then
+
+  if command -v python >/dev/null 2>&1 && python -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
     echo "python"
     return
   fi
+
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)" >/dev/null 2>&1; then
+    echo "python3"
+    return
+  fi
   echo ""
+}
+
+resolve_gpu_uuid() {
+  local gpu_index="$1"
+  local idx=""
+  local uuid=""
+
+  while IFS=, read -r idx uuid; do
+    idx="$(echo "$idx" | xargs)"
+    uuid="$(echo "$uuid" | xargs)"
+    if [[ "$idx" == "$gpu_index" && -n "$uuid" ]]; then
+      echo "$uuid"
+      return 0
+    fi
+  done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null || true)
+
+  echo "Error: --gpu '$gpu_index' was not found in nvidia-smi GPU index list" >&2
+  exit 1
 }
 
 find_nvcc() {
@@ -266,8 +331,8 @@ write_run_config() {
     git_commit="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   fi
 
-  gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n "$((GPU + 1))p" | xargs || true)"
-  driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
+  gpu_name="$(nvidia-smi -i "$GPU_UUID" --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
+  driver_version="$(nvidia-smi -i "$GPU_UUID" --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
   cuda_driver_version="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n1 | xargs || true)"
   nvcc_version="$("$NVCC_BIN" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\),.*/\1/p' | head -n1 | xargs || true)"
   python_version="$("$PYTHON_BIN" --version 2>&1 | xargs || true)"
@@ -286,6 +351,7 @@ git_commit=$git_commit
 project_root=$PROJECT_ROOT
 environment=$ENV_NAME
 gpu_index=$GPU
+gpu_uuid=$GPU_UUID
 gpu_name=${gpu_name:-unknown}
 driver_version=${driver_version:-unknown}
 cuda_driver_version=${cuda_driver_version:-unknown}
@@ -417,6 +483,12 @@ if [[ -z "$PYTHON_BIN" ]]; then
   echo "Error: python3/python not found" >&2
   exit 1
 fi
+require_python3 "$PYTHON_BIN"
+
+require_non_negative_int "$GPU" "--gpu"
+require_positive_int "$SAMPLE_MS" "--sample-ms"
+require_positive_int "$ENERGY_DURATION_MS" "--energy-duration-ms"
+require_trim_ratio "$STABLE_WINDOW_TRIM" "--stable-window-trim"
 
 NVCC_BIN="$(find_nvcc)"
 if [[ -z "$NVCC_BIN" ]]; then
@@ -435,6 +507,9 @@ require_cmd make
 require_cmd nvidia-smi
 require_cmd "$PYTHON_BIN"
 require_cmd g++
+
+GPU_UUID="$(resolve_gpu_uuid "$GPU")"
+echo "Using GPU index $GPU -> UUID $GPU_UUID"
 
 mkdir -p "$RESULTS_ROOT"/baseline "$RESULTS_ROOT"/energy "$RESULTS_ROOT"/profiling "$RESULTS_ROOT"/env "$RESULTS_ROOT"/tmp "$LOG_DIR"
 
@@ -476,7 +551,7 @@ if [[ "$PROFILE_ONLY" == "1" ]]; then
   TS="$(date +%Y%m%d_%H%M%S)"
   echo "[profile-only] Capturing Nsight Systems BW/Compute/GEMM traces"
   echo "[profile-only] Using TMPDIR=$NSYS_TMP_DIR"
-  if ! run_nsys_profiles "$BENCH_BIN" "$GPU" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile-only"; then
+  if ! run_nsys_profiles "$BENCH_BIN" "$GPU_UUID" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile-only"; then
     echo "Error: Nsight Systems profiling failed in profile-only mode." >&2
     echo "Hint: run 'nsys status --environment' and verify BENCH_BIN='$BENCH_BIN' is executable." >&2
     exit 1
@@ -487,7 +562,7 @@ fi
 
 if [[ "$SKIP_BASELINE" != "1" ]]; then
   echo "[1/6] Running baseline benchmarks for $ENV_NAME"
-  CUDA_VISIBLE_DEVICES="$GPU" "$BENCH_BIN" --mode all --out-dir "$RESULTS_ROOT/baseline" | tee "$LOG_DIR/run_all_stdout.txt"
+  CUDA_VISIBLE_DEVICES="$GPU_UUID" "$BENCH_BIN" --mode all --out-dir "$RESULTS_ROOT/baseline" | tee "$LOG_DIR/run_all_stdout.txt"
 else
   echo "[1/6] Skipping baseline benchmarks (--skip-baseline)"
 fi
@@ -495,16 +570,16 @@ fi
 PERF_DIR="$RESULTS_ROOT/baseline"
 
 echo "[2/6] Logging bandwidth power cases"
-run_energy_case "BW peak" "bw_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
-run_energy_case "BW sustained" "bw_sustained" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "BW peak" "bw_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "BW sustained" "bw_sustained" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[3/6] Logging compute power cases"
-run_energy_case "Compute FP32 peak" "compute_fp32_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
-run_energy_case "Compute FP64 peak" "compute_fp64_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "Compute FP32 peak" "compute_fp32_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "Compute FP64 peak" "compute_fp64_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[4/6] Logging GEMM power cases"
-run_energy_case "GEMM TF32=0 max" "gemm_tf32_0_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
-run_energy_case "GEMM TF32=1 max" "gemm_tf32_1_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "GEMM TF32=0 max" "gemm_tf32_0_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+run_energy_case "GEMM TF32=1 max" "gemm_tf32_1_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
 echo "[5/6] Computing efficiency + plots"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/energy_active_summary.py" \
@@ -538,7 +613,7 @@ if [[ "$DO_PROFILE" == "1" ]]; then
   require_cmd nsys
   TS="$(date +%Y%m%d_%H%M%S)"
   echo "[profile] Using TMPDIR=$NSYS_TMP_DIR"
-  if ! run_nsys_profiles "$BENCH_BIN" "$GPU" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile"; then
+  if ! run_nsys_profiles "$BENCH_BIN" "$GPU_UUID" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile"; then
     echo "Error: Nsight Systems profiling failed at end of campaign." >&2
     echo "Hint: run 'nsys status --environment' and verify BENCH_BIN='$BENCH_BIN' is executable." >&2
     exit 1
