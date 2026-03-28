@@ -139,11 +139,12 @@ chmod +x scripts/run_compare.sh
 
 `run_compare.sh` regenerates `--output-dir` from scratch, so stale files from older comparisons do not survive into the new artifact set.
 
-If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison into a fresh sibling folder, for example:
+If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison. In a fresh clone, the repo no longer tracks an empty `results/rtx5000/` tree, so the following command creates the expected path directly. If `results/rtx5000` already exists from an older copy, remove it first to avoid nested `results/rtx5000/rtx5000` paths.
 
 ```bash
-scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000_remote  # replace user_rtx with the remote username
-./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000_remote --output-dir results/compare
+rm -rf ~/tfg/results/rtx5000  # only needed if that local folder already exists from a previous copy
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
 ```
 
 This generates:
@@ -223,8 +224,9 @@ export RTX5000_GPU_INDEX=0  # replace 0 with the RTX5000 NVIDIA index reported b
 ./scripts/run_campaign.sh --env rtx5000 --gpu "$RTX5000_GPU_INDEX" --sample-ms 10 --energy-duration-ms 2000 --stable-window-trim 0.15 --profile
 
 # Back on A100 server: copy RTX5000 results and compare
-scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000_remote  # replace user_rtx with the remote username
-./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000_remote --output-dir results/compare
+rm -rf ~/tfg/results/rtx5000  # only needed if that local folder already exists from a previous copy
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
 ```
 
 ## Validation commands (manual)
@@ -276,7 +278,7 @@ ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
 Create a timestamped archive including both environments and comparison outputs:
 
 ```bash
-tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/rtx5000_remote results/compare
+tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/rtx5000 results/compare
 ```
 
 ## Methodology notes
