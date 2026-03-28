@@ -19,6 +19,33 @@ Examples:
 EOF
 }
 
+abspath_py() {
+  local bin="$1"
+  local path="$2"
+  "$bin" -c "import os, sys; print(os.path.abspath(sys.argv[1]))" "$path"
+}
+
+validate_output_dir() {
+  local out_dir="$1"
+  local project_root="$2"
+  local a100_root="$3"
+  local rtx5000_root="$4"
+  local results_root="$5"
+
+  if [[ -z "$out_dir" || "$out_dir" == "/" ]]; then
+    echo "Error: refusing to use unsafe output dir '$out_dir'" >&2
+    exit 1
+  fi
+  if [[ "$out_dir" == "$project_root" || "$out_dir" == "$results_root" ]]; then
+    echo "Error: output dir must be a dedicated compare folder, not '$out_dir'" >&2
+    exit 1
+  fi
+  if [[ "$out_dir" == "$a100_root" || "$out_dir" == "$rtx5000_root" ]]; then
+    echo "Error: output dir must differ from benchmark result roots" >&2
+    exit 1
+  fi
+}
+
 pick_python() {
   if [[ -n "${PYTHON_BIN:-}" ]]; then
     echo "$PYTHON_BIN"
@@ -98,12 +125,34 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 require_python3 "$PYTHON_BIN"
 
+PROJECT_ROOT_REAL="$(abspath_py "$PYTHON_BIN" "$PROJECT_ROOT")"
+RESULTS_ROOT_REAL="$(abspath_py "$PYTHON_BIN" "$PROJECT_ROOT/results")"
+A100_ROOT_REAL="$(abspath_py "$PYTHON_BIN" "$A100_ROOT")"
+RTX5000_ROOT_REAL="$(abspath_py "$PYTHON_BIN" "$RTX5000_ROOT")"
+OUTPUT_DIR_REAL="$(abspath_py "$PYTHON_BIN" "$OUTPUT_DIR")"
+validate_output_dir "$OUTPUT_DIR_REAL" "$PROJECT_ROOT_REAL" "$A100_ROOT_REAL" "$RTX5000_ROOT_REAL" "$RESULTS_ROOT_REAL"
+
+TMP_OUTPUT_DIR="${OUTPUT_DIR_REAL}.tmp.$$"
+cleanup_tmp_output() {
+  if [[ -n "${TMP_OUTPUT_DIR:-}" && -d "$TMP_OUTPUT_DIR" ]]; then
+    rm -rf "$TMP_OUTPUT_DIR"
+  fi
+}
+trap cleanup_tmp_output EXIT
+rm -rf "$TMP_OUTPUT_DIR"
+mkdir -p "$TMP_OUTPUT_DIR"
+
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/plot_compare_envs.py" \
-  --a100-root "$A100_ROOT" \
-  --rtx5000-root "$RTX5000_ROOT" \
-  --output-dir "$OUTPUT_DIR"
+  --a100-root "$A100_ROOT_REAL" \
+  --rtx5000-root "$RTX5000_ROOT_REAL" \
+  --output-dir "$TMP_OUTPUT_DIR"
 
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/validate_compare.py" \
-  --compare-dir "$OUTPUT_DIR"
+  --compare-dir "$TMP_OUTPUT_DIR"
 
-echo "Done: comparison artifacts generated in $OUTPUT_DIR"
+rm -rf "$OUTPUT_DIR_REAL"
+mkdir -p "$(dirname "$OUTPUT_DIR_REAL")"
+mv "$TMP_OUTPUT_DIR" "$OUTPUT_DIR_REAL"
+trap - EXIT
+
+echo "Done: comparison artifacts generated in $OUTPUT_DIR_REAL"

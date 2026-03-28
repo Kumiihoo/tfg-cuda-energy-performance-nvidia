@@ -106,10 +106,10 @@ Useful flags:
 # Resume post-baseline stages only (energy, summary, plots, validation)
 ./scripts/run_campaign.sh --env rtx5000 --skip-build --skip-baseline
 
-# Capture Nsight Systems BW/Compute/GEMM traces with timestamp at end of campaign
+# Capture Nsight Systems BW/Compute/GEMM/FFT traces with timestamp at end of campaign
 ./scripts/run_campaign.sh --env rtx5000 --profile
 
-# Capture only Nsight BW/Compute/GEMM traces (no 1/6..6/6 pipeline)
+# Capture only Nsight BW/Compute/GEMM/FFT traces (no 1/7..7/7 pipeline)
 ./scripts/run_campaign.sh --env rtx5000 --profile-only --skip-build
 ```
 
@@ -137,10 +137,13 @@ chmod +x scripts/run_compare.sh
 ./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
 ```
 
-If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison, for example:
+`run_compare.sh` regenerates `--output-dir` from scratch, so stale files from older comparisons do not survive into the new artifact set.
+
+If campaigns were executed on different servers, copy one environment results tree to the server where you run the comparison into a fresh sibling folder, for example:
 
 ```bash
-scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000_remote  # replace user_rtx with the remote username
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000_remote --output-dir results/compare
 ```
 
 This generates:
@@ -152,8 +155,7 @@ This generates:
 - `results/compare/efficiency_compare.png`
 - `results/compare/speedup_a100_vs_rtx5000.png`
 
-The comparison summary reports both `BW peak` and `BW sustained`, and now includes FFT performance when `fft.csv` is available in both environments.
-FFT currently contributes to the performance comparison only; the efficiency comparison still covers the original energy-tracked cases.
+The comparison summary reports both `BW peak` and `BW sustained`, and now includes FFT performance and efficiency when the baseline and energy artifacts are available in both environments.
 Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s` or `MSamples/s`.
 `environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
 `run_compare.sh` now fails validation when strict-match methodology fields differ across environments.
@@ -221,8 +223,8 @@ export RTX5000_GPU_INDEX=0  # replace 0 with the RTX5000 NVIDIA index reported b
 ./scripts/run_campaign.sh --env rtx5000 --gpu "$RTX5000_GPU_INDEX" --sample-ms 10 --energy-duration-ms 2000 --stable-window-trim 0.15 --profile
 
 # Back on A100 server: copy RTX5000 results and compare
-scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000  # replace user_rtx with the remote username
-./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000 --output-dir results/compare
+scp -r user_rtx@10.222.1.134:~/tfg/results/rtx5000 ~/tfg/results/rtx5000_remote  # replace user_rtx with the remote username
+./scripts/run_compare.sh --a100-root results/a100 --rtx5000-root results/rtx5000_remote --output-dir results/compare
 ```
 
 ## Validation commands (manual)
@@ -256,16 +258,17 @@ Use Nsight Systems for timeline evidence, not for final throughput tables.
 # Select the NVIDIA GPU index first if not already exported in this shell
 export GPU_INDEX="${GPU_INDEX:-0}"  # replace 0 with the NVIDIA index reported by nvidia-smi
 
-# Automatic profiling (bw + compute + gemm) at end of campaign
+# Automatic profiling (bw + compute + gemm + fft) at end of campaign
 ./scripts/run_campaign.sh --env a100 --gpu "$GPU_INDEX" --profile
 
-# Profiling only (bw + compute + gemm)
+# Profiling only (bw + compute + gemm + fft)
 ./scripts/run_campaign.sh --env a100 --gpu "$GPU_INDEX" --profile-only --skip-build
 
 # Expected artifacts
 ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
        results/a100/profiling/compute_trace_*.nsys-rep \
-       results/a100/profiling/gemm_trace_*.nsys-rep
+       results/a100/profiling/gemm_trace_*.nsys-rep \
+       results/a100/profiling/fft_trace_*.nsys-rep
 ```
 
 ## Final packaging (archive all artifacts)
@@ -273,7 +276,7 @@ ls -lh results/a100/profiling/bw_trace_*.nsys-rep \
 Create a timestamped archive including both environments and comparison outputs:
 
 ```bash
-tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/rtx5000 results/compare
+tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/rtx5000_remote results/compare
 ```
 
 ## Methodology notes
@@ -281,7 +284,7 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Final performance values must come from non-profiled runs.
 - BW traffic is reported as read + write for copy kernel.
 - BW summaries distinguish `BW peak` (max observed GB/s) from `BW sustained` (last, largest-size sweep point).
-- Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`).
+- Power logs are captured per selected target case (`BW peak`, `BW sustained`, `Compute FP32 peak`, `Compute FP64 peak`, `GEMM TF32=0 max`, `GEMM TF32=1 max`, `FFT C2C max`).
 - Energy runs execute each selected case in-process until the requested duration is reached, instead of stitching together many short process invocations.
 - Each energy case writes a metadata CSV with measured work time, wall time, case repeats, UTC timestamps, and source-host local wall-clock timestamps for the benchmark interval.
 - Campaign runs pass an explicit energy `case_key` into the metadata so each power log can be matched back to the selected baseline target deterministically.
@@ -293,7 +296,7 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.
-- FFT is currently integrated as a baseline/control benchmark plus cross-environment performance comparison; it is not yet part of the automated energy summary target set.
+- FFT is integrated as a baseline/control benchmark, an automated energy-summary target, and a cross-environment performance/efficiency comparison case.
 - Efficiency uses the benchmark-delimited stable window: first crop the logger to the benchmark start/end timestamps with strict overlap, then trim the configured fraction from the beginning and end of that run window.
 - Stable-window recropping uses the local benchmark timestamps recorded in the metadata, so summaries can be recomputed on another machine without depending on that machine's current timezone.
 - In `efficiency_active_summary.csv`, `Perf` now refers to the long-run execution used for power; baseline performance is retained as an audit column so power and efficiency come from the same run.

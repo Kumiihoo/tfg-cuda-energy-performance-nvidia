@@ -15,8 +15,8 @@ Options:
   --skip-baseline         Skip baseline run (useful to resume energy/plots/validation)
   --skip-build            Skip cmake configure/build step
   --install-python-deps   Run pip install -r requirements.txt before execution
-  --profile               Capture Nsight Systems BW/Compute/GEMM traces with timestamp
-  --profile-only          Capture only Nsight Systems BW/Compute/GEMM traces and exit
+  --profile               Capture Nsight Systems BW/Compute/GEMM/FFT traces with timestamp
+  --profile-only          Capture only Nsight Systems BW/Compute/GEMM/FFT traces and exit
   --help                  Show this help
 
 Examples:
@@ -289,11 +289,16 @@ run_nsys_profile() {
   local out_prefix="$4"
   local tmp_nsys_dir="$5"
   local out_root="$6"
+  local trace_spec="cuda"
 
   mkdir -p "$(dirname "$out_prefix")" "$tmp_nsys_dir" "$out_root/tmp"
 
+  if [[ "$mode" == "gemm" ]]; then
+    trace_spec="cuda,cublas"
+  fi
+
   TMPDIR="$tmp_nsys_dir" CUDA_VISIBLE_DEVICES="$gpu" \
-    nsys profile --force-overwrite true --sample=none --cpuctxsw=none --trace=cuda,cublas \
+    nsys profile --force-overwrite true --sample=none --cpuctxsw=none --trace="$trace_spec" \
       -o "$out_prefix" \
       "$bench_bin" --mode "$mode" --out-dir "$out_root/tmp"
 }
@@ -307,7 +312,7 @@ run_nsys_profiles() {
   local step_label="$6"
 
   local mode
-  for mode in bw compute gemm; do
+  for mode in bw compute gemm fft; do
     local out_prefix="$results_root/profiling/${mode}_trace_${ts}"
     echo "[$step_label] Capturing Nsight Systems ${mode} trace"
     if ! run_nsys_profile "$bench_bin" "$gpu" "$mode" "$out_prefix" "$tmp_nsys_dir" "$results_root"; then
@@ -549,39 +554,42 @@ echo "Saved run config: $RESULTS_ROOT/env/run_config.txt"
 if [[ "$PROFILE_ONLY" == "1" ]]; then
   require_cmd nsys
   TS="$(date +%Y%m%d_%H%M%S)"
-  echo "[profile-only] Capturing Nsight Systems BW/Compute/GEMM traces"
+  echo "[profile-only] Capturing Nsight Systems BW/Compute/GEMM/FFT traces"
   echo "[profile-only] Using TMPDIR=$NSYS_TMP_DIR"
   if ! run_nsys_profiles "$BENCH_BIN" "$GPU_UUID" "$RESULTS_ROOT" "$NSYS_TMP_DIR" "$TS" "profile-only"; then
     echo "Error: Nsight Systems profiling failed in profile-only mode." >&2
     echo "Hint: run 'nsys status --environment' and verify BENCH_BIN='$BENCH_BIN' is executable." >&2
     exit 1
   fi
-  echo "Done: profile traces at $RESULTS_ROOT/profiling/{bw,compute,gemm}_trace_${TS}.nsys-rep"
+  echo "Done: profile traces at $RESULTS_ROOT/profiling/{bw,compute,gemm,fft}_trace_${TS}.nsys-rep"
   exit 0
 fi
 
 if [[ "$SKIP_BASELINE" != "1" ]]; then
-  echo "[1/6] Running baseline benchmarks for $ENV_NAME"
+  echo "[1/7] Running baseline benchmarks for $ENV_NAME"
   CUDA_VISIBLE_DEVICES="$GPU_UUID" "$BENCH_BIN" --mode all --out-dir "$RESULTS_ROOT/baseline" | tee "$LOG_DIR/run_all_stdout.txt"
 else
-  echo "[1/6] Skipping baseline benchmarks (--skip-baseline)"
+  echo "[1/7] Skipping baseline benchmarks (--skip-baseline)"
 fi
 
 PERF_DIR="$RESULTS_ROOT/baseline"
 
-echo "[2/6] Logging bandwidth power cases"
+echo "[2/7] Logging bandwidth power cases"
 run_energy_case "BW peak" "bw_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 run_energy_case "BW sustained" "bw_sustained" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
-echo "[3/6] Logging compute power cases"
+echo "[3/7] Logging compute power cases"
 run_energy_case "Compute FP32 peak" "compute_fp32_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 run_energy_case "Compute FP64 peak" "compute_fp64_peak" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
-echo "[4/6] Logging GEMM power cases"
+echo "[4/7] Logging GEMM power cases"
 run_energy_case "GEMM TF32=0 max" "gemm_tf32_0_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 run_energy_case "GEMM TF32=1 max" "gemm_tf32_1_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
 
-echo "[5/6] Computing efficiency + plots"
+echo "[5/7] Logging FFT power case"
+run_energy_case "FFT C2C max" "fft_c2c_max" "$BENCH_BIN" "$RESULTS_ROOT" "$GPU_UUID" "$SAMPLE_MS" "$ENERGY_DURATION_MS" "$PERF_DIR"
+
+echo "[6/7] Computing efficiency + plots"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/energy_active_summary.py" \
   --perf-dir "$RESULTS_ROOT/baseline" \
   --power-dir "$RESULTS_ROOT/energy" \
@@ -604,7 +612,7 @@ echo "[5/6] Computing efficiency + plots"
   --input "$RESULTS_ROOT/baseline/fft.csv" \
   --output "$RESULTS_ROOT/baseline/fft.png"
 
-echo "[6/6] Validating outputs"
+echo "[7/7] Validating outputs"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/validate_results.py" \
   --results-dir "$RESULTS_ROOT/baseline" \
   --energy-summary "$RESULTS_ROOT/energy/efficiency_active_summary.csv"

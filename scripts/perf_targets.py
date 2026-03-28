@@ -14,6 +14,7 @@ TEST_ORDER = [
     "Compute FP64 peak",
     "GEMM TF32=0 max",
     "GEMM TF32=1 max",
+    "FFT C2C max",
 ]
 
 TEST_LABEL = {
@@ -23,6 +24,7 @@ TEST_LABEL = {
     "Compute FP64 peak": "Compute FP64",
     "GEMM TF32=0 max": "GEMM TF32=0",
     "GEMM TF32=1 max": "GEMM TF32=1",
+    "FFT C2C max": "FFT C2C",
 }
 
 
@@ -83,6 +85,11 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
     bw_path = choose_perf_file(perf_dir, "bw")
     compute_path = choose_perf_file(perf_dir, "compute")
     gemm_path = choose_perf_file(perf_dir, "gemm")
+    fft_path = None
+    for candidate in (perf_dir / "fft.csv", perf_dir / "fft_baseline.csv"):
+        if candidate.exists():
+            fft_path = candidate
+            break
 
     bw = _read_csv(bw_path)
     compute = _read_csv(compute_path)
@@ -91,6 +98,11 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
     _require_columns(bw_path, bw, {"bytes", "iters", "block", "GBs"})
     _require_columns(compute_path, compute, {"dtype", "block", "grid", "iters", "GFLOPs"})
     _require_columns(gemm_path, gemm, {"N", "iters", "tf32", "GFLOPs"})
+    fft_num: pd.DataFrame | None = None
+    if fft_path is not None:
+        fft = _read_csv(fft_path)
+        _require_columns(fft_path, fft, {"n", "batch", "iters", "time_ms", "transforms_per_s", "MSamples_per_s"})
+        fft_num = _numeric_frame(fft, ["n", "batch", "iters", "MSamples_per_s"], fft_path)
 
     bw_num = _numeric_frame(bw, ["bytes", "iters", "block", "GBs"], bw_path)
     bw_peak_row = bw_num.loc[bw_num["GBs"].idxmax()]
@@ -197,6 +209,30 @@ def load_perf_targets(perf_dir: Path) -> list[PerfTarget]:
                     str(int(row["iters"])),
                     "--gemm-tf32",
                     str(tf32),
+                ),
+            )
+        )
+
+    if fft_num is not None:
+        row = fft_num.loc[fft_num["MSamples_per_s"].idxmax()]
+        power_log_name = "power_fft_c2c_max_long.csv"
+        targets.append(
+            PerfTarget(
+                case_key="fft_c2c_max",
+                test="FFT C2C max",
+                perf_unit="MSamples/s",
+                perf=float(row["MSamples_per_s"]),
+                power_log_name=power_log_name,
+                meta_log_name=_meta_name_from_power_log(power_log_name),
+                bench_args=(
+                    "--mode",
+                    "fft",
+                    "--fft-n",
+                    str(int(row["n"])),
+                    "--fft-batch",
+                    str(int(row["batch"])),
+                    "--fft-iters",
+                    str(int(row["iters"])),
                 ),
             )
         )

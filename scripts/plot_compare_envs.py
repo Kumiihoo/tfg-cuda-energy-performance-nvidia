@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from perf_targets import TEST_LABEL, TEST_ORDER, load_perf_targets
 
-PERF_TEST_ORDER = TEST_ORDER + ["FFT C2C max"]
+PERF_TEST_ORDER = TEST_ORDER
 EXTRA_TEST_LABEL = {"FFT C2C max": "FFT C2C"}
 
 
@@ -199,16 +199,6 @@ def load_performance(env_root: Path) -> dict[str, tuple[str, float]]:
     perf: dict[str, tuple[str, float]] = {}
     for target in load_perf_targets(env_root / "baseline"):
         perf[target.test] = (target.perf_unit, target.perf)
-
-    fft_path = env_root / "baseline" / "fft.csv"
-    if fft_path.exists():
-        fft = read_csv(fft_path)
-        require_columns(fft_path, fft, {"n", "batch", "iters", "MSamples_per_s"})
-        fft["MSamples_per_s"] = pd.to_numeric(fft["MSamples_per_s"], errors="coerce")
-        fft = fft.dropna(subset=["MSamples_per_s"]).copy()
-        if not fft.empty:
-            row = fft.loc[fft["MSamples_per_s"].idxmax()]
-            perf["FFT C2C max"] = ("MSamples/s", as_float(row["MSamples_per_s"], f"{fft_path}:FFT C2C max"))
     return perf
 
 

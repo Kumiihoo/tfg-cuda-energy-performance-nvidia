@@ -9,7 +9,7 @@ from perf_targets import TEST_ORDER, load_perf_targets
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate benchmark CSV outputs")
-    parser.add_argument("--results-dir", default="results/a100/baseline", help="Directory containing bw.csv, compute.csv and gemm.csv")
+    parser.add_argument("--results-dir", default="results/a100/baseline", help="Directory containing bw.csv, compute.csv, gemm.csv and fft.csv")
     parser.add_argument("--require-energy", action="store_true",
                         help="Require an energy summary at <results-dir>/energy/efficiency_active_summary.csv")
     parser.add_argument("--energy-summary", default="",

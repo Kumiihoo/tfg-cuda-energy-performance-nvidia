@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 from perf_targets import TEST_ORDER
 
-OPTIONAL_PERFORMANCE_TESTS = {"FFT C2C max"}
+OPTIONAL_PERFORMANCE_TESTS: set[str] = set()
 
 REQUIRED_FILES = [
     "summary_compare.csv",
@@ -33,7 +33,7 @@ EXPECTED_TESTS = set(TEST_ORDER)
 EXPECTED_METRICS = {"performance", "efficiency"}
 EXPECTED_UNITS = {
     "performance": {"GB/s", "GFLOP/s", "MSamples/s"},
-    "efficiency": {"GB/s/W", "GFLOP/s/W"},
+    "efficiency": {"GB/s/W", "GFLOP/s/W", "MSamples/s/W"},
 }
 ENV_COMPARE_COLUMNS = {
     "category",
