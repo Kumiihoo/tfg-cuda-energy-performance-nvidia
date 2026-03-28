@@ -159,8 +159,8 @@ This generates:
 The comparison summary reports both `BW peak` and `BW sustained`, and now includes FFT performance and efficiency when the baseline and energy artifacts are available in both environments.
 Performance and efficiency plots separate incompatible units into different subplots, so `GB/s` is not mixed with `GFLOP/s` or `MSamples/s`.
 `environment_compare.csv` and `methodology_notes.txt` make stack mismatches and measurement-scope limitations explicit.
-`run_compare.sh` now fails validation when strict-match methodology fields differ across environments.
-Those strict-match fields include driver/CUDA driver versions, `nvcc`, Python version, sampling period, energy duration, trim ratio, and the documented telemetry/scope metadata.
+`run_compare.sh` now allows cross-server software stack differences such as driver/CUDA driver versions, `nvcc`, or Python version to remain as warnings in the comparison metadata so the compare artifacts can still be generated for demos and heterogeneous lab servers.
+`run_compare.sh` still fails validation when blocking measurement-methodology fields differ across environments, namely sampling period, energy duration, trim ratio, or the documented telemetry/scope metadata.
 `git_commit` is exported as informational reproducibility metadata when `git` is available, but missing `git` no longer blocks cross-environment comparison.
 
 ## Preflight (environment checks only)
@@ -206,7 +206,7 @@ nvidia-smi | head -n 5
 ./scripts/run_compare.sh --help >/dev/null
 ```
 
-For reproducible A100 vs RTX5000 comparisons, keep `--sample-ms`, `--energy-duration-ms`, and `--stable-window-trim` identical across servers, and avoid stack drift in driver/CUDA/`nvcc`/Python versions. If `git` is available on both servers, running both campaigns from the same repo commit is still strongly recommended for traceability, but it is no longer required to make `run_compare.sh` succeed.
+For reproducible A100 vs RTX5000 comparisons, keep `--sample-ms`, `--energy-duration-ms`, and `--stable-window-trim` identical across servers, and keep the telemetry/scope metadata aligned. Driver/CUDA/`nvcc`/Python drift is still reported in the comparison metadata, but it no longer blocks `run_compare.sh` on heterogeneous servers. If `git` is available on both servers, running both campaigns from the same repo commit is still strongly recommended for traceability, but it is no longer required to make `run_compare.sh` succeed.
 
 ## Two-server execution (A100 + RTX5000)
 
@@ -295,6 +295,7 @@ tar -czf "results/tfg_results_$(date +%Y%m%d_%H%M%S).tgz" results/a100 results/r
 - Power telemetry comes from `nvidia-smi` and reflects GPU-board power only; this project does not measure whole-node/system power.
 - `git_commit` is recorded in `run_config.txt` when `git` is available, but it is treated as informational metadata rather than a strict comparison blocker.
 - Cross-environment comparison now exports metadata warnings so driver/toolchain or sampling mismatches are visible in `results/compare/environment_compare.csv` and `results/compare/methodology_notes.txt`.
+- Driver/CUDA/`nvcc`/Python mismatches remain non-blocking warnings in the comparison metadata; blocking validation is reserved for measurement-methodology mismatches such as sample period, energy duration, trim ratio, telemetry source, or power scope.
 - Compute grid size is derived from detected SM count.
 - BW maximum size is capped automatically from available VRAM for portability.
 - FFT baseline uses 1D batched C2C transforms with throughput reported in `MSamples/s`.

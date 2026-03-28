@@ -45,6 +45,15 @@ ENV_COMPARE_COLUMNS = {
     "status",
 }
 ENV_COMPARE_STATUSES = {"ok", "info", "warning"}
+BLOCKING_MISMATCH_FIELDS = {
+    "sample_ms",
+    "energy_duration_ms",
+    "stable_window_trim",
+    "power_telemetry_source",
+    "power_scope",
+    "node_power_not_measured",
+    "activity_definition",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,7 +124,7 @@ def check_summary(path: Path) -> None:
         expect_close(path, f"delta_percent for test='{row['test']}' metric='{row['metric']}'", delta, (ratio - 1.0) * 100.0)
 
 
-def check_env_compare(path: Path) -> None:
+def check_env_compare(path: Path) -> list[str]:
     df = pd.read_csv(path)
     if df.empty:
         fail(f"No rows in {path}")
@@ -129,9 +138,10 @@ def check_env_compare(path: Path) -> None:
         fail(f"{path}: unexpected status values {sorted(statuses)}")
 
     warnings = df[df["status"].astype(str) == "warning"].copy()
-    if not warnings.empty:
-        fields = sorted(set(warnings["field"].astype(str)))
-        fail(f"{path}: methodology mismatches detected in strict-match metadata fields {fields}")
+    warning_fields = sorted(set(warnings["field"].astype(str)))
+    blocking_fields = sorted(field for field in warning_fields if field in BLOCKING_MISMATCH_FIELDS)
+    if blocking_fields:
+        fail(f"{path}: methodology mismatches detected in blocking measurement metadata fields {blocking_fields}")
 
     required_fields = {
         "environment",
@@ -153,6 +163,7 @@ def check_env_compare(path: Path) -> None:
     fields = set(df["field"].astype(str))
     if not required_fields.issubset(fields):
         fail(f"{path}: missing metadata fields {sorted(required_fields.difference(fields))}")
+    return warning_fields
 
 
 def main() -> None:
@@ -161,9 +172,14 @@ def main() -> None:
 
     check_files(compare_dir)
     check_summary(compare_dir / "summary_compare.csv")
-    check_env_compare(compare_dir / "environment_compare.csv")
+    warning_fields = check_env_compare(compare_dir / "environment_compare.csv")
 
-    print(f"Comparison artifacts OK: {compare_dir}")
+    if warning_fields:
+        print(
+            f"Comparison artifacts OK with non-blocking environment warnings {warning_fields}: {compare_dir}"
+        )
+    else:
+        print(f"Comparison artifacts OK: {compare_dir}")
 
 
 if __name__ == "__main__":
